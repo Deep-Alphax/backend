@@ -1,0 +1,104 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Compose de PRODUÇÃO (VPS). Sobe a app + Postgres + Redis numa rede interna.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Diferenças-chave vs. o docker-compose.yml (dev):
+#  - A app roda em container (imagem buildada pelo Dockerfile), não no host.
+#  - Postgres/Redis NÃO expõem portas ao host público (só rede interna Docker).
+#    -> DB e cache ficam inacessíveis da internet; menor superfície de ataque.
+#  - Dentro da rede Docker os hosts são os NOMES dos serviços: `postgres`/`redis`
+#    nas portas padrão 5432/6379 (o remapeamento 5433/6380 era só p/ o host dev).
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepalpha-backend:latest
+    container_name: deepalpha-app
+    restart: unless-stopped
+    # Segredos e config vêm do arquivo .env (NÃO versionado). Ver bloco abaixo.
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: '3333'
+    ports:
+      # Publica SÓ a app. Prefira ligar ao loopback e pôr um proxy (nginx/Caddy)
+      # na frente para TLS: '127.0.0.1:3333:3333'. Use '3333:3333' apenas se for
+      # acessar direto por IP:porta (sem HTTPS — não recomendado em prod).
+      - '127.0.0.1:3333:3333'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - deepalpha
+    healthcheck:
+      # Bate no endpoint /health da própria app (sem depender de curl/wget).
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "require('http').get('http://127.0.0.1:3333/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: deepalpha-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-deepalpha}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-deepalpha}
+    # Sem `ports:` -> acessível apenas pela rede interna Docker.
+    volumes:
+      - deepalpha_pgdata:/var/lib/postgresql/data
+    networks:
+      - deepalpha
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-deepalpha} -d ${POSTGRES_DB:-deepalpha}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: deepalpha-redis
+    restart: unless-stopped
+    # Senha no Redis mesmo em rede interna (defesa em profundidade).
+    command:
+      [
+        'redis-server',
+        '--save',
+        '60',
+        '1',
+        '--loglevel',
+        'warning',
+        '--requirepass',
+        '${REDIS_PASSWORD:?defina REDIS_PASSWORD no .env}',
+      ]
+    volumes:
+      - deepalpha_redisdata:/data
+    networks:
+      - deepalpha
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  deepalpha:
+    driver: bridge
+
+volumes:
+  deepalpha_pgdata:
+  deepalpha_redisdata:

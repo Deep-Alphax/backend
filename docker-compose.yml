@@ -1,0 +1,42 @@
+# Infra de desenvolvimento — Postgres + Redis.
+# Subir:  docker compose up -d   (ou: pnpm db:up)
+# Derrubar: docker compose down   (com -v também apaga os volumes/dados)
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: deepalpha-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: deepalpha
+      POSTGRES_PASSWORD: deepalpha
+      POSTGRES_DB: deepalpha
+    ports:
+      # Host 5433 (a 5432 já é usada pelo projeto antigo podiogo). Container continua 5432.
+      - '5433:5432'
+    volumes:
+      - deepalpha_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U deepalpha -d deepalpha']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: deepalpha-redis
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--loglevel', 'warning']
+    ports:
+      # Host 6380 (a 6379 já é usada pelo projeto antigo podiogo). Container continua 6379.
+      - '6380:6379'
+    volumes:
+      - deepalpha_redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  deepalpha_pgdata:
+  deepalpha_redisdata:

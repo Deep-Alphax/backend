@@ -1,0 +1,344 @@
+// Deep Alpha — Wallet Analytics / Trading PnL
+// Prisma schema. Datasource PostgreSQL.
+// Regras: valores monetários em Decimal (numeric) — NUNCA Float (perda de precisão).
+// Timestamps sempre em UTC; o bucket por hora/dia aplica o timezone do usuário na leitura.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth / Identidade
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id       String @id @default(cuid())
+  email    String @unique
+  // Null quando a conta é só Google (sem login local por senha).
+  password String?
+
+  firstName String @default("")
+  lastName  String @default("")
+  // avatarUrl: URL exibida no front. Para contas Google, a foto é BAIXADA e
+  // re-hospedada por nós (bytes em `avatarData`, servidos por GET /users/:id/avatar)
+  // → avatarUrl aponta para o nosso endpoint, não para o googleusercontent.
+  avatarUrl  String?
+  avatarData Bytes? // imagem redimensionada (webp) — servida pelo nosso backend
+  avatarMime String? // content-type de `avatarData` (ex.: image/webp)
+
+  // Google OAuth (vínculo por googleId; e-mail verificado exigido na strategy).
+  googleId    String? @unique
+  googleEmail String?
+
+  role          Role    @default(USER)
+  isActive      Boolean @default(true)
+  emailVerified Boolean @default(false)
+
+  // 2FA por e-mail (opcional). Quando true, o login emite um challenge (mfaToken)
+  // e só devolve tokens reais após o código OTP enviado por e-mail.
+  mfaEnabled Boolean @default(false)
+
+  // Revogação de sessão sem denylist: JwtStrategy rejeita access token com iat
+  // anterior a passwordChangedAt (troca/reset de senha derruba sessões roubadas).
+  passwordChangedAt DateTime?
+  lastLoginAt       DateTime?
+
+  language              String  @default("EN")
+  acceptedTerms         Boolean @default(false)
+  acceptedPrivacyPolicy Boolean @default(false)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  wallets   Wallet[]
+  snapshots MetricSnapshot[]
+  sources   Source[]
+
+  @@index([googleId])
+  @@index([deletedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Carteiras (multi-wallet, multi-chain)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Família da chain — governa validação de endereço e qual provider/normalizador usar.
+enum ChainType {
+  EVM
+  SOLANA
+}
+
+// Chains concretas suportadas no MVP. EVM compartilha formato de endereço (0x…);
+// SOLANA usa base58. Novas chains entram aqui sem alterar o resto do schema.
+enum Chain {
+  SOLANA
+  ETHEREUM
+  BASE
+  ARBITRUM
+  BSC
+  POLYGON
+  OPTIMISM
+}
+
+enum SyncStatus {
+  PENDING // cadastrada, ainda não sincronizada
+  SYNCING // ingestão em andamento
+  SYNCED // histórico atualizado
+  ERROR // última sync falhou (ver syncError)
+}
+
+// Papel da carteira no sistema:
+//  - OWN: carteira DO usuário (entra nas métricas de portfólio/PnL dele).
+//  - SOURCE: carteira de uma FONTE de alpha que o usuário segue (ingerida para
+//    atribuir os trades do usuário por lead-lag; NUNCA entra nas métricas dele).
+// O mesmo pipeline de ingestão (WalletSyncService) serve os dois papéis.
+enum WalletKind {
+  OWN
+  SOURCE
+}
+
+model Wallet {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Papel da carteira. Carteiras SOURCE pertencem a uma `Source` (sourceId) e são
+  // filtradas fora de toda leitura de métricas do usuário (só alimentam atribuição).
+  kind     WalletKind @default(OWN)
+  sourceId String?
+  source   Source?    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  // address: forma canônica de exibição (checksum EVM / base58 Solana).
+  // addressNorm: forma normalizada p/ dedupe e lookup (lowercase no EVM;
+  // idêntico ao address no Solana, que é case-sensitive).
+  address     String
+  addressNorm String
+  chainType   ChainType
+  chain       Chain
+  label       String?
+  isActive    Boolean   @default(true)
+
+  // Estado de sincronização com o provider.
+  syncStatus   SyncStatus @default(PENDING)
+  syncCursor   String? // cursor de paginação do provider (ingestão incremental)
+  syncError    String?
+  lastSyncedAt DateTime?
+  firstTxAt    DateTime? // 1ª atividade on-chain conhecida (limite do histórico)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  trades    Trade[]
+  positions TokenPosition[]
+  snapshots MetricSnapshot[]
+
+  // Uma mesma carteira (endereço) só pode ser cadastrada uma vez por usuário POR
+  // CHAIN. O mesmo endereço 0x no Ethereum e no Base são carteiras distintas
+  // (atividades on-chain independentes), então a unique é por `chain`, não `chainType`.
+  @@unique([userId, chain, addressNorm])
+  @@index([userId])
+  @@index([syncStatus])
+  @@index([sourceId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trades normalizados (fonte da verdade para todas as métricas)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum TradeSide {
+  BUY // recebeu o token base, pagou em quote
+  SELL // vendeu o token base, recebeu quote
+}
+
+// Um swap normalizado (uma perna base<->quote). Idempotente por (wallet, tx, mint, side).
+model Trade {
+  id       String @id @default(cuid())
+  walletId String
+  wallet   Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  chainType ChainType
+  txHash    String
+  blockTime DateTime // UTC — timestamp on-chain do bloco
+  side      TradeSide
+
+  // Ativo negociado (base) e ativo de cotação (quote — normalmente estável/native).
+  baseMint   String
+  baseSymbol String?
+  baseAmount Decimal @db.Decimal(38, 18) // qtd absoluta do token base
+
+  quoteMint   String
+  quoteSymbol String?
+  quoteAmount Decimal @db.Decimal(38, 18) // qtd absoluta do quote
+
+  // Valuation em USD no instante do bloco (do provider). priceUsd = USD por 1 base.
+  usdValue Decimal @db.Decimal(38, 12) // notional do trade em USD
+  priceUsd Decimal @db.Decimal(38, 18)
+
+  // Taxas: gas/DEX. feeUsd alimenta a métrica "% do valor que virou taxa".
+  feeUsd    Decimal @default(0) @db.Decimal(38, 12)
+  feeNative Decimal @default(0) @db.Decimal(38, 18)
+
+  // Qualidade do dado: se o preço USD veio direto do provider (true) ou foi
+  // estimado/imputado (false). Alimenta o campo de confiança/precisão dos agregados.
+  priceResolved Boolean @default(true)
+
+  dexProgram String? // router/programa da DEX
+  raw        Json? // payload cru do provider (auditoria/reprocessamento)
+  createdAt  DateTime @default(now())
+
+  // Fontes de alpha às quais este trade foi atribuído (lead-lag). Só faz sentido
+  // para trades de carteira OWN; recomputável (ver TradeAttribution).
+  attributions TradeAttribution[]
+
+  @@unique([walletId, txHash, baseMint, side])
+  @@index([walletId, blockTime])
+  @@index([walletId, baseMint, blockTime])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fontes de alpha (desks/grupos que o usuário segue) + atribuição de trades
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Uma "Fonte" = um provedor de sinal que o usuário acompanha, representado por
+// uma ou mais carteiras on-chain (Wallet kind=SOURCE). Os trades do usuário são
+// atribuídos a uma fonte quando ele COMPRA o mesmo token logo após a fonte.
+model Source {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name     String
+  isActive Boolean @default(true)
+
+  // Janela de atribuição (lead-lag): tempo máximo, em horas, entre a compra da
+  // fonte e a minha compra para o trade ainda contar como "segui essa fonte".
+  attributionWindowHours Int @default(6)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  wallets      Wallet[]
+  attributions TradeAttribution[]
+
+  // O nome é único por usuário (catálogo pessoal de fontes).
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// Atribuição de um trade (compra do usuário) a uma fonte, via lead-lag. Tabela
+// derivada/recomputável: apagada e recriada quando trades/fontes mudam. Uma
+// mesma compra pode casar com mais de uma fonte (todas que "chamaram" o token).
+model TradeAttribution {
+  id       String @id @default(cuid())
+  tradeId  String
+  trade    Trade  @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  sourceId String
+  source   Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  // Rastreabilidade: qual compra da fonte casou e a defasagem (compra do usuário − compra da fonte).
+  leadTradeId  String
+  leadWalletId String
+  lagSeconds   Int
+
+  createdAt DateTime @default(now())
+
+  @@unique([tradeId, sourceId])
+  @@index([sourceId])
+  @@index([tradeId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Posição por token (ledger materializado — acelera agregados sem rescan total)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TokenPosition {
+  id       String @id @default(cuid())
+  walletId String
+  wallet   Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  mint   String
+  symbol String?
+
+  // Custo médio ponderado (WACC) e quantidade corrente ainda em carteira.
+  qtyHeld      Decimal @default(0) @db.Decimal(38, 18)
+  avgCostUsd   Decimal @default(0) @db.Decimal(38, 18) // custo médio por unidade
+  realizedPnl  Decimal @default(0) @db.Decimal(38, 12) // PnL realizado acumulado (USD)
+  feesUsd      Decimal @default(0) @db.Decimal(38, 12)
+  buyCount     Int     @default(0)
+  sellCount    Int     @default(0)
+  firstBuyAt   DateTime?
+  lastTradeAt  DateTime?
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([walletId, mint])
+  @@index([walletId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snapshot de métricas (cache de leitura — invalidado a cada nova sync)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum MetricScope {
+  WALLET // métricas de uma carteira específica
+  PORTFOLIO // agregado de todas as carteiras do usuário
+}
+
+enum MetricPeriod {
+  D30
+  D90
+  M12
+}
+
+model MetricSnapshot {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  walletId String? // null quando scope = PORTFOLIO
+  wallet   Wallet? @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  scope  MetricScope
+  period MetricPeriod
+
+  // Resultado calculado (PnL total, nº trades, buckets por hora/dia, hold times,
+  // trades-após-perda, precisão/confiança, etc.). JSON versionado pelo tradesHash.
+  data       Json
+  tradesHash String // hash das entradas — se mudou, o snapshot é recomputado
+  computedAt DateTime @default(now())
+
+  @@unique([userId, walletId, scope, period])
+  @@index([userId])
+}
+
+// Cache de candles OHLC por token (Bloco 2 — pico pós-entrada / benchmark).
+// Evita refazer chamadas ao provider (custo/rate-limit). Preços como Decimal.
+model TokenCandle {
+  id        String    @id @default(cuid())
+  chainType ChainType
+  chain     Chain
+  mint      String
+  timeframe String // '1h' | '1d'
+  openTime  DateTime // início do bucket (UTC)
+
+  open  Decimal @db.Decimal(38, 18)
+  high  Decimal @db.Decimal(38, 18)
+  low   Decimal @db.Decimal(38, 18)
+  close Decimal @db.Decimal(38, 18)
+
+  createdAt DateTime @default(now())
+
+  @@unique([chain, mint, timeframe, openTime])
+  @@index([chain, mint, timeframe, openTime])
+}
