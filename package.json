@@ -5,6 +5,7 @@
   "author": "deep-alpha",
   "private": true,
   "license": "MIT",
+  "packageManager": "pnpm@11.21.0",
   "scripts": {
     "build": "nest build",
     "build:docker": "nest build --builder swc",
@@ -21,17 +22,6 @@
     "prisma:generate": "prisma generate",
     "migrate": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy"
-  },
-  "pnpm": {
-    "//": "Menor privilégio: SÓ estas deps podem rodar scripts de build (binários nativos). As de telemetria (@scarf/scarf, @nestjs/core) ficam bloqueadas de propósito.",
-    "onlyBuiltDependencies": [
-      "@prisma/client",
-      "@prisma/engines",
-      "prisma",
-      "@swc/core",
-      "sharp",
-      "unrs-resolver"
-    ]
   },
   "dependencies": {
     "@fontsource/dm-sans": "^5.2.8",

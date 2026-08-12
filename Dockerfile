@@ -12,7 +12,7 @@ WORKDIR /app
 RUN apk add --no-cache openssl libc6-compat
 # Corepack habilita o pnpm na versão travada pelo packageManager (se houver).
 RUN corepack enable
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # Cache do store do pnpm entre builds (BuildKit).
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile

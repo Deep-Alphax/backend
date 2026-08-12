@@ -1,0 +1,10 @@
+# Configurações do pnpm (pnpm >= 10.16/11 leem daqui, não mais do package.json).
+# Menor privilégio: SÓ estas deps podem rodar scripts de build (binários nativos).
+# As de telemetria (@scarf/scarf, @nestjs/core) ficam bloqueadas de propósito.
+onlyBuiltDependencies:
+  - '@prisma/client'
+  - '@prisma/engines'
+  - prisma
+  - '@swc/core'
+  - sharp
+  - unrs-resolver
