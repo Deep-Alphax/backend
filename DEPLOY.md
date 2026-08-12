@@ -24,8 +24,13 @@ Crie o `.env` na VPS a partir deste template:
 ```env
 NODE_ENV=production
 PORT=3333
-FRONTEND_URL=https://app.deepalpha.app
-API_PUBLIC_URL=https://api.deepalpha.app
+# Host CANÔNICO do front (apex, sem www). É a origin exata liberada no CORS e o
+# alvo do redirect pós-OAuth. Precisa bater com o Origin que o browser envia.
+FRONTEND_URL=https://deepalpha.fun
+# Origens EXTRAS confiáveis (CSV). O front redireciona www→apex, mas listamos o
+# www como rede de segurança para qualquer request que escape antes do redirect.
+CORS_ADDITIONAL_ORIGINS=https://www.deepalpha.fun
+API_PUBLIC_URL=https://api.deepalpha.fun
 
 # --- Postgres: host = nome do serviço "postgres", porta 5432 ---
 POSTGRES_USER=deepalpha
@@ -42,14 +47,14 @@ REDIS_PASSWORD=<SENHA_FORTE_REDIS>
 # --- Segredos (gere com: openssl rand -base64 48) ---
 JWT_SECRET=<...>
 SESSION_SECRET=<...>
-COOKIE_DOMAIN=.deepalpha.app
+COOKIE_DOMAIN=.deepalpha.fun
 
 # --- Obrigatórios em prod ---
 CLOUDFLARE_TURNSTILE_SECRET_KEY=<...>
 MORALIS_API_KEY=<...>
 GOOGLE_CLIENT_ID=<...>
 GOOGLE_CLIENT_SECRET=<...>
-GOOGLE_CALLBACK_URL=https://api.deepalpha.app/api/v1/auth/google/callback
+GOOGLE_CALLBACK_URL=https://api.deepalpha.fun/api/v1/auth/google/callback
 SEND_GRID=<...>
 SOLANA_RPC_URL=<Helius/QuickNode em prod>
 ```
