@@ -45,7 +45,7 @@ import {
   VerifyLoginMfaDto,
 } from './dto/auth.dto';
 import { sanitizeRelativePath } from '../../common/utils/safe-redirect.util';
-import { ALLOWED_ORIGINS } from '../../common/config/allowed-origins';
+import { getAllowedOrigins } from '../../common/config/allowed-origins';
 import { NoCache } from '../../common/decorators/cache.decorator';
 import {
   applyAuthCookiesFromResult,
@@ -179,7 +179,7 @@ export class AuthController {
     // redirectUri precisa pertencer a uma origem permitida (defesa contra open redirect).
     try {
       const redirectUrl = new URL(body.redirectUri);
-      const isAllowed = ALLOWED_ORIGINS.some((origin) => {
+      const isAllowed = getAllowedOrigins().some((origin) => {
         try {
           return new URL(origin).hostname === redirectUrl.hostname;
         } catch {

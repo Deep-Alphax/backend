@@ -1,0 +1,108 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploy de produção — build no CI, imagem no GHCR, VPS só faz `pull` + `up`.
+#
+# Fluxo: push na master → builda a imagem no runner do GitHub (não no VPS de 1 GB)
+# → publica no GHCR → SSH no VPS → docker compose pull + up -d. As migrations
+# rodam sozinhas no boot do container (docker-entrypoint.sh → prisma migrate deploy).
+#
+# Segredos necessários (Settings → Secrets and variables → Actions):
+#   SSH_HOST   IP público do VPS
+#   SSH_USER   usuário SSH (ex.: root)
+#   SSH_KEY    chave PRIVADA SEM passphrase; a pública vai no ~/.ssh/authorized_keys do VPS
+#   SSH_PORT   (opcional) porta SSH; default 22
+# O login no GHCR (push no CI e pull no VPS) usa o GITHUB_TOKEN nativo — sem PAT extra.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy (prod)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {} # permite disparar manualmente pela aba Actions
+
+# Serializa deploys: nunca dois ao mesmo tempo; não cancela um deploy em andamento.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  # GHCR exige tudo minúsculo. Org "Deep-Alphax" → "deep-alphax".
+  IMAGE: ghcr.io/deep-alphax/backend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # necessário p/ publicar no GHCR com o GITHUB_TOKEN
+    outputs:
+      tag: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: SHA curto (tag imutável da imagem)
+        id: meta
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build e push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # Duas tags: `latest` (conveniência) e o SHA (deploy determinístico/rollback).
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.sha }}
+          # Cache de camadas entre builds → deploys seguintes muito mais rápidos.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Envia só o compose (o .env com segredos permanece no servidor, intocado).
+      - name: Copia docker-compose.prod.yml pro VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: docker-compose.prod.yml
+          target: /srv/backend
+
+      - name: Deploy (pull + up) via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.tag }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          envs: GHCR_USER,GHCR_TOKEN,IMAGE_TAG
+          script: |
+            set -e
+            cd /srv/backend
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            export IMAGE_TAG="$IMAGE_TAG"
+            # Puxa a imagem exata deste commit e recria só o app (db/redis seguem de pé).
+            docker compose -f docker-compose.prod.yml pull app
+            docker compose -f docker-compose.prod.yml up -d
+            docker logout ghcr.io
+            docker image prune -f

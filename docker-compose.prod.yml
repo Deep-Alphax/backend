@@ -15,7 +15,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: deepalpha-backend:latest
+    # Imagem publicada pelo CI no GHCR. O servidor faz `pull` desta ref (não builda).
+    # IMAGE_TAG é injetado pelo deploy (SHA do commit); default `latest` p/ uso manual.
+    image: ghcr.io/deep-alphax/backend:${IMAGE_TAG:-latest}
     container_name: deepalpha-app
     restart: unless-stopped
     # Segredos e config vêm do arquivo .env (NÃO versionado). Ver bloco abaixo.
