@@ -45,7 +45,6 @@ import {
   VerifyLoginMfaDto,
 } from './dto/auth.dto';
 import { sanitizeRelativePath } from '../../common/utils/safe-redirect.util';
-import { getAllowedOrigins } from '../../common/config/allowed-origins';
 import { NoCache } from '../../common/decorators/cache.decorator';
 import {
   applyAuthCookiesFromResult,
@@ -59,6 +58,11 @@ function clientIp(req: any): string {
   return req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
 }
 
+/** Normaliza uma URI p/ comparação exata: trim + sem barra(s) final(is). */
+function normalizeUri(value: string): string {
+  return value.trim().replace(/\/+$/, '');
+}
+
 @ApiTags('Authentication')
 @Controller('api/v1/auth')
 export class AuthController {
@@ -67,6 +71,19 @@ export class AuthController {
     private readonly oauthState: OAuthStateService,
     private readonly configService: ConfigService,
   ) {}
+
+  /**
+   * Callback OAuth esperado do backend — ÚNICO `redirectUri` válido na troca do
+   * code. Resolve igual à `GoogleStrategy` (env `GOOGLE_CALLBACK_URL`, senão o
+   * default local) para as duas pontas casarem sempre.
+   */
+  private expectedGoogleRedirectUri(): string {
+    const configured = this.configService.get<string>('GOOGLE_CALLBACK_URL');
+    const port = this.configService.get<string>('PORT') || '3333';
+    return normalizeUri(
+      configured || `http://localhost:${port}/api/v1/auth/google/callback`,
+    );
+  }
 
   @Get('email/availability')
   @Throttle({ short: { limit: 10, ttl: 60000 } })
@@ -176,23 +193,15 @@ export class AuthController {
     if (!body.code) throw new BadRequestException('Código de autorização do Google é obrigatório');
     if (!body.redirectUri) throw new BadRequestException('URI de redirecionamento é obrigatória');
 
-    // redirectUri precisa pertencer a uma origem permitida (defesa contra open redirect).
-    try {
-      const redirectUrl = new URL(body.redirectUri);
-      const isAllowed = getAllowedOrigins().some((origin) => {
-        try {
-          return new URL(origin).hostname === redirectUrl.hostname;
-        } catch {
-          return false;
-        }
-      });
-      const isLocalhost =
-        process.env.NODE_ENV === 'development' &&
-        (redirectUrl.hostname === 'localhost' || redirectUrl.hostname.endsWith('.localhost'));
-      if (!isAllowed && !isLocalhost) throw new BadRequestException('redirectUri não permitido');
-    } catch (e) {
-      if (e instanceof BadRequestException) throw e;
-      throw new BadRequestException('redirectUri inválido');
+    // O `redirectUri` NÃO é um destino de redirect do browser: é o `redirect_uri`
+    // repassado ao token endpoint do Google, que exige valor IDÊNTICO ao usado no
+    // consent — ou seja, o callback do BACKEND (host `api.*`, não o do front).
+    // Por isso o valor legítimo é ÚNICO e conhecido: comparamos exatamente com o
+    // callback resolvido (mesma lógica da GoogleStrategy). Isso trava qualquer
+    // open-redirect e corrige o falso "não permitido" em prod (a checagem antiga
+    // usava as origens do FRONT, onde `api.deepalpha.fun` nunca aparece).
+    if (normalizeUri(body.redirectUri) !== this.expectedGoogleRedirectUri()) {
+      throw new BadRequestException('redirectUri não permitido');
     }
 
     const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);
