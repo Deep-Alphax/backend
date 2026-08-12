@@ -35,15 +35,12 @@ export class CacheRedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async connect(): Promise<void> {
-    const enabled =
-      this.configService.get<string>('REDIS_ENABLED') === 'true' &&
-      !!this.configService.get<string>('REDIS_HOST');
-    if (!enabled) return;
-
+    // Redis SEMPRE ativo (sem flag REDIS_ENABLED). Host default = 127.0.0.1.
+    // Fail-open: se a conexão falhar, o cache vira no-op e a app segue funcionando.
     try {
       const c = createClient({
         socket: {
-          host: this.configService.get<string>('REDIS_HOST')!,
+          host: this.configService.get<string>('REDIS_HOST') ?? '127.0.0.1',
           port: this.configService.get<number>('REDIS_PORT', 6379),
         },
         password:

@@ -1,9 +1,15 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  Optional,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Chain, ChainType, TradeSide } from '@prisma/client';
 import { chainTypeOf } from '../../wallets/wallet-address.util';
+import { CacheRedisService } from '../../../common/services/cache-redis.service';
 import {
   MarketDataProvider,
   FetchSwapsParams,
@@ -45,9 +51,18 @@ export class MoralisProvider implements MarketDataProvider {
   /** Mint do Wrapped SOL — usado para extrair o preço do SOL de cada swap. */
   private static readonly WSOL = 'So11111111111111111111111111111111111111112';
 
+  /** TTL (s) do cache de snapshot resolvido. "Vivo/morto" muda devagar → 6h economiza CU. */
+  private static readonly SNAP_TTL_OK = 6 * 60 * 60;
+  /** TTL (s) do cache de snapshot NÃO resolvido — curto, p/ auto-recuperar de falha transitória. */
+  private static readonly SNAP_TTL_MISS = 15 * 60;
+  /** Limite de tokens por request no batch de preços EVM da Moralis. */
+  private static readonly EVM_PRICE_BATCH = 25;
+
   constructor(
     private readonly config: ConfigService,
     private readonly http: HttpService,
+    // Cache opcional (fail-open): sem Redis, o adapter funciona igual, só sem economia.
+    @Optional() private readonly cache?: CacheRedisService,
   ) {
     this.apiKey = this.config.get<string>('MORALIS_API_KEY') ?? '';
     this.evmBase =
@@ -242,25 +257,156 @@ export class MoralisProvider implements MarketDataProvider {
   }
 
   async fetchTokenSnapshot(chain: Chain, mint: string): Promise<TokenSnapshot | null> {
-    if (!this.apiKey) return null;
-    try {
-      const url =
-        chainTypeOf(chain) === ChainType.EVM
-          ? `${this.evmBase}/erc20/${mint}/price`
-          : `${this.solanaBase}/token/${this.solanaNetwork}/${mint}/price`;
-      const query =
-        chainTypeOf(chain) === ChainType.EVM
-          ? { chain: MORALIS_EVM_CHAIN[chain] ?? '' }
-          : {};
-      const data = await this.getSafe(url, query as Record<string, string>);
-      if (!data) return null;
-      return {
-        priceUsd: this.num(data?.usdPrice ?? data?.usdPriceFormatted),
-        liquidityUsd: this.num(data?.pairTotalLiquidityUsd ?? data?.liquidityUsd),
-      };
-    } catch {
-      return null;
+    const m = await this.fetchTokenSnapshots(chain, [mint]);
+    return m.get(mint) ?? null;
+  }
+
+  /**
+   * Snapshots em LOTE (survival). Estratégia de custo, em 3 camadas:
+   *   1) cache Redis por (chain,mint) — hits não tocam a Moralis;
+   *   2) misses vão num ÚNICO request batch por chain (EVM: /erc20/prices;
+   *      Solana: /token/{net}/prices, com fallback single p/ o que o batch não cobrir);
+   *   3) resultado (inclusive `null`) é cacheado — TTL 6h p/ resolvido, 15min p/ falha.
+   * Best-effort: qualquer erro deixa o mint como `null` (não lança).
+   */
+  async fetchTokenSnapshots(
+    chain: Chain,
+    mints: string[],
+  ): Promise<Map<string, TokenSnapshot | null>> {
+    const out = new Map<string, TokenSnapshot | null>();
+    if (mints.length === 0) return out;
+
+    const uniq = [...new Set(mints)];
+    if (!this.apiKey) {
+      for (const m of uniq) out.set(m, null);
+      return out;
     }
+
+    // Camada 1: cache.
+    const misses: string[] = [];
+    for (const mint of uniq) {
+      const cached = await this.cacheGetSnap(chain, mint);
+      if (cached !== undefined) out.set(mint, cached);
+      else misses.push(mint);
+    }
+    if (misses.length === 0) return out;
+
+    // Camada 2: batch por chain.
+    const fetched =
+      chainTypeOf(chain) === ChainType.EVM
+        ? await this.fetchEvmSnapshots(chain, misses)
+        : await this.fetchSolanaSnapshots(misses);
+
+    // Camada 3: registra e cacheia (inclusive null, com TTL curto).
+    for (const mint of misses) {
+      const snap = fetched.get(mint) ?? null;
+      out.set(mint, snap);
+      await this.cacheSetSnap(chain, mint, snap);
+    }
+    return out;
+  }
+
+  /** Batch de preços EVM (POST /erc20/prices, até 25/req). Casa por endereço (case-insensitive). */
+  private async fetchEvmSnapshots(
+    chain: Chain,
+    mints: string[],
+  ): Promise<Map<string, TokenSnapshot | null>> {
+    const out = new Map<string, TokenSnapshot | null>();
+    const chainParam = MORALIS_EVM_CHAIN[chain];
+    if (!chainParam) {
+      for (const m of mints) out.set(m, null);
+      return out;
+    }
+
+    const CHUNK = MoralisProvider.EVM_PRICE_BATCH;
+    for (let i = 0; i < mints.length; i += CHUNK) {
+      const chunk = mints.slice(i, i + CHUNK);
+      const data = await this.postSafe(
+        `${this.evmBase}/erc20/prices`,
+        { chain: chainParam },
+        { tokens: chunk.map((a) => ({ token_address: a })) },
+      );
+      const rows: any[] = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.result)
+          ? data.result
+          : [];
+      const byAddr = new Map<string, any>();
+      for (const r of rows) {
+        const a = String(r?.tokenAddress ?? r?.token_address ?? '').toLowerCase();
+        if (a) byAddr.set(a, r);
+      }
+      for (const mint of chunk) {
+        const r = byAddr.get(mint.toLowerCase());
+        out.set(mint, r ? this.toSnapshot(r) : null);
+      }
+    }
+    return out;
+  }
+
+  /** Batch de preços Solana (POST /token/{net}/prices). Mint ausente da resposta → null. */
+  private async fetchSolanaSnapshots(
+    mints: string[],
+  ): Promise<Map<string, TokenSnapshot | null>> {
+    const out = new Map<string, TokenSnapshot | null>();
+    const data = await this.postSafe(
+      `${this.solanaBase}/token/${this.solanaNetwork}/prices`,
+      {},
+      { addresses: mints },
+    );
+    const rows: any[] = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.result)
+        ? data.result
+        : [];
+    const byAddr = new Map<string, any>();
+    for (const r of rows) {
+      const a = String(r?.tokenAddress ?? r?.mint ?? r?.address ?? '');
+      if (a) byAddr.set(a, r);
+    }
+    for (const mint of mints) {
+      const r = byAddr.get(mint);
+      out.set(mint, r ? this.toSnapshot(r) : null);
+    }
+    return out;
+  }
+
+  /** Linha de preço da Moralis → TokenSnapshot (defensivo contra variação de campo). */
+  private toSnapshot(r: any): TokenSnapshot {
+    return {
+      priceUsd: this.num(r?.usdPrice ?? r?.usdPriceFormatted),
+      liquidityUsd: this.num(r?.pairTotalLiquidityUsd ?? r?.liquidityUsd),
+    };
+  }
+
+  // ─────────────────────────── Cache de snapshot (Redis, fail-open) ───────────────────────────
+
+  private snapKey(chain: Chain, mint: string): string {
+    return `moralis:snap:v1:${chain}:${mint}`;
+  }
+
+  /** `undefined` = não cacheado; caso contrário devolve o valor (snapshot ou `null` cacheado). */
+  private async cacheGetSnap(
+    chain: Chain,
+    mint: string,
+  ): Promise<TokenSnapshot | null | undefined> {
+    if (!this.cache) return undefined;
+    const wrapped = await this.cache.getJson<{ v: TokenSnapshot | null }>(
+      this.snapKey(chain, mint),
+    );
+    return wrapped ? wrapped.v : undefined;
+  }
+
+  private async cacheSetSnap(
+    chain: Chain,
+    mint: string,
+    snap: TokenSnapshot | null,
+  ): Promise<void> {
+    if (!this.cache) return;
+    const ttl = snap
+      ? MoralisProvider.SNAP_TTL_OK
+      : MoralisProvider.SNAP_TTL_MISS;
+    await this.cache.setJson(this.snapKey(chain, mint), { v: snap }, ttl);
   }
 
   /** Escolhe o par mais líquido de uma resposta de "token pairs". */
@@ -323,6 +469,33 @@ export class MoralisProvider implements MarketDataProvider {
     } catch (err: any) {
       this.logger.warn(
         `Moralis GET ${url} (best-effort) falhou (status=${err?.response?.status ?? 'n/a'})`,
+      );
+      return null;
+    }
+  }
+
+  /** POST que NÃO lança (best-effort): erro/ausência → null. Usado nos batches de preço. */
+  private async postSafe(
+    url: string,
+    params: Record<string, string>,
+    body: unknown,
+  ): Promise<any | null> {
+    try {
+      const resp = await firstValueFrom(
+        this.http.post(url, body, {
+          params,
+          headers: {
+            accept: 'application/json',
+            'content-type': 'application/json',
+            'X-API-Key': this.apiKey,
+          },
+          timeout: 15000,
+        } as any),
+      );
+      return resp.data;
+    } catch (err: any) {
+      this.logger.warn(
+        `Moralis POST ${url} (best-effort) falhou (status=${err?.response?.status ?? 'n/a'})`,
       );
       return null;
     }

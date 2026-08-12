@@ -31,10 +31,9 @@ export class ConcurrencyRedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   isEnabled(): boolean {
-    return (
-      this.configService.get<string>('REDIS_ENABLED') === 'true' &&
-      !!this.configService.get<string>('REDIS_HOST')
-    );
+    // Redis sempre habilitado (sem flag REDIS_ENABLED). ensureClient é fail-open:
+    // se o Redis estiver inacessível, cai para o Map em memória.
+    return true;
   }
 
   private async ensureClient(): Promise<ReturnType<typeof createClient> | null> {
@@ -48,13 +47,13 @@ export class ConcurrencyRedisService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
     this.initAttempted = true;
-    const host = this.configService.get<string>('REDIS_HOST');
+    const host = this.configService.get<string>('REDIS_HOST') ?? '127.0.0.1';
     const port = this.configService.get<number>('REDIS_PORT', 6379);
     const password = this.configService.get<string>('REDIS_PASSWORD');
     const db = this.configService.get<number>('REDIS_CONCURRENCY_DB', 0);
     try {
       const c = createClient({
-        socket: { host: host!, port },
+        socket: { host, port },
         password: password && password.length > 0 ? password : undefined,
         database: db,
       });

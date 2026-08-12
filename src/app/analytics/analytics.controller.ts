@@ -1,10 +1,20 @@
-import { Controller, Get, Param, Query, Request, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Query,
+  Request,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { MetricPeriod } from '@prisma/client';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AnalyticsService } from './analytics.service';
+import { HttpCacheInterceptor } from '../../common/interceptors/http-cache.interceptor';
+import { CacheTTL } from '../../common/decorators/cache.decorator';
 
 class MetricsQueryDto {
   @IsOptional()
@@ -32,6 +42,11 @@ class MetricsQueryDto {
 @ApiTags('Analytics')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
+// Cache HTTP curto (60s), chaveado por usuário (ver HttpCacheInterceptor.trackBy) e por
+// URL+query. Absorve refresh/rajada do dashboard antes de chegar ao service/Moralis.
+// TTL em ms (contrato do @nestjs/cache-manager). Só afeta GET (métodos abaixo).
+@UseInterceptors(HttpCacheInterceptor)
+@CacheTTL(60_000)
 @Controller('api/v1')
 export class AnalyticsController {
   constructor(private readonly analytics: AnalyticsService) {}

@@ -38,8 +38,7 @@ POSTGRES_PASSWORD=<SENHA_FORTE_DB>
 POSTGRES_DB=deepalpha
 DATABASE_URL="postgresql://deepalpha:<SENHA_FORTE_DB>@postgres:5432/deepalpha?schema=public"
 
-# --- Redis: host = nome do serviço "redis", porta 6379 ---
-REDIS_ENABLED=true
+# --- Redis: host = nome do serviço "redis", porta 6379 (sempre ativo; fail-open) ---
 REDIS_HOST=redis
 REDIS_PORT=6379
 REDIS_PASSWORD=<SENHA_FORTE_REDIS>

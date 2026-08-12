@@ -39,7 +39,7 @@ describe('AnalyticsService', () => {
     client.trade.aggregate.mockResolvedValue({ _count: { _all: 3 }, _max: { createdAt: new Date(1000) } });
     client.metricSnapshot.findFirst.mockResolvedValue({
       id: 's1',
-      tradesHash: `v3:3:1000:0`,
+      tradesHash: `v4:3:1000:0`,
       data: { totalTrades: 3, cached: true },
     });
 

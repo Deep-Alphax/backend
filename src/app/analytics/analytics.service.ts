@@ -30,8 +30,10 @@ import {
 import {
   MARKET_DATA_PROVIDER,
   MarketDataProvider,
+  TokenSnapshot,
 } from './providers/market-data-provider.interface';
 import { CandleService, CandleFull } from './candle.service';
+import { CacheRedisService } from '../../common/services/cache-redis.service';
 
 /** Dias de janela por período. M12 = 365 (ano corrido). */
 const PERIOD_DAYS: Record<MetricPeriod, number> = {
@@ -45,6 +47,14 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
 /** Teto de tokens consultados no Bloco 2 por request (contém custo/rate-limit). */
 const MAX_TOKENS_PER_REQUEST = 40;
+
+/**
+ * TTL (s) do cache do Bloco 2 (peaks+survival+benchmark). A chave carrega a
+ * assinatura de trades → trades novos invalidam sozinhos; o TTL só limita a
+ * validade dos dados externos (preço atual p/ survival). 30min equilibra
+ * frescor × custo Moralis.
+ */
+const EXTRAS_TTL_SECONDS = 30 * 60;
 
 const TRADE_SELECT = {
   blockTime: true,
@@ -70,6 +80,8 @@ export class AnalyticsService {
     @Inject(MARKET_DATA_PROVIDER)
     private readonly provider?: MarketDataProvider,
     @Optional() private readonly candles?: CandleService,
+    // Cache do Bloco 2 (fail-open): sem Redis, recomputa sempre (comportamento antigo).
+    @Optional() private readonly cache?: CacheRedisService,
   ) {}
 
   /** Métricas de UMA carteira do usuário (Bloco 1, com cache por snapshot). */
@@ -252,9 +264,30 @@ export class AnalyticsService {
     if (!this.provider || !this.candles || walletIds.length === 0)
       return this.emptyExtras();
 
+    const read = this.prisma.getReadClient();
+
+    // Cache do Bloco 2: assinatura barata (count + max createdAt) → trades novos trocam
+    // a chave e invalidam sozinhos; TTL limita a validade dos preços externos (survival).
+    // Evita o pior custo Moralis: recomputar candles/preços a cada request de dashboard.
+    const sig = await read.trade.aggregate({
+      where: { walletId: { in: walletIds } },
+      _count: { _all: true },
+      _max: { createdAt: true },
+    });
+    const cacheKey =
+      `analytics:extras:v1:${period}:${tzOffsetMinutes}:` +
+      `${this.hashWalletIds(walletIds)}:${sig._count._all}:${sig._max.createdAt?.getTime() ?? 0}`;
+
+    const cached = await this.cache?.getJson<{
+      peaks: PeakMetrics;
+      survival: Survival;
+      benchmark: Benchmark;
+    }>(cacheKey);
+    if (cached) return cached;
+
     const windowStart = this.windowStart(period);
     // Carrega trades COM a chain da carteira (candles/preço são por chain).
-    const rows = await this.prisma.getReadClient().trade.findMany({
+    const rows = await read.trade.findMany({
       where: { walletId: { in: walletIds } },
       select: {
         ...TRADE_SELECT,
@@ -310,27 +343,33 @@ export class AnalyticsService {
     }
     const peaks = computePeakMetrics(positions, candlesByMint);
 
-    // Sobrevida: preço atual por token (>0 = vivo).
-    const statuses: Array<'alive' | 'dead' | 'unknown'> = [];
+    // Sobrevida: preço atual por token (>0 = vivo). EM LOTE por chain — 1 request/chain
+    // (com cache por mint no provider) em vez de N chamadas single. Corta o custo Moralis.
+    const mintsByChain = new Map<Chain, string[]>();
     for (const mint of mints) {
       const cc = mintChain.get(mint);
-      if (!cc) {
-        statuses.push('unknown');
-        continue;
-      }
+      if (!cc) continue;
+      const arr = mintsByChain.get(cc.chain) ?? [];
+      arr.push(mint);
+      mintsByChain.set(cc.chain, arr);
+    }
+    const snapByMint = new Map<string, TokenSnapshot | null>();
+    for (const [chain, chainMints] of mintsByChain) {
       try {
-        const snap = await this.provider.fetchTokenSnapshot(cc.chain, mint);
-        if (!snap) statuses.push('unknown');
-        else
-          statuses.push(
-            snap.priceUsd != null && Number(snap.priceUsd) > 0
-              ? 'alive'
-              : 'dead',
-          );
+        const m = await this.provider.fetchTokenSnapshots(chain, chainMints);
+        for (const [k, v] of m) snapByMint.set(k, v);
       } catch {
-        statuses.push('unknown');
+        // best-effort: mints dessa chain ficam 'unknown'
       }
     }
+    const statuses: Array<'alive' | 'dead' | 'unknown'> = mints.map((mint) => {
+      if (!mintChain.has(mint)) return 'unknown';
+      const snap = snapByMint.get(mint);
+      if (!snap) return 'unknown';
+      return snap.priceUsd != null && Number(snap.priceUsd) > 0
+        ? 'alive'
+        : 'dead';
+    });
     const survival = computeSurvival(statuses);
 
     // Benchmark: preço diário do SOL → capital acumulado medido em SOL.
@@ -354,7 +393,19 @@ export class AnalyticsService {
       benchmark = buildBenchmark(points, solByDate);
     }
 
-    return { peaks, survival, benchmark };
+    const extras = { peaks, survival, benchmark };
+    await this.cache?.setJson(cacheKey, extras, EXTRAS_TTL_SECONDS);
+    return extras;
+  }
+
+  /** Hash estável e curto do conjunto de walletIds (ordem-insensível) p/ chave de cache. */
+  private hashWalletIds(ids: string[]): string {
+    const joined = [...ids].sort().join(',');
+    let h = 5381;
+    for (let i = 0; i < joined.length; i++) {
+      h = ((h << 5) + h + joined.charCodeAt(i)) >>> 0; // djb2
+    }
+    return `${ids.length}_${h.toString(36)}`;
   }
 
   private windowStart(period: MetricPeriod): Date {

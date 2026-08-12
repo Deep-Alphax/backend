@@ -98,4 +98,15 @@ export interface MarketDataProvider {
 
   /** Preço/liquidez ATUAIS de um token; `null` quando indisponível (token "morto"). */
   fetchTokenSnapshot(chain: Chain, mint: string): Promise<TokenSnapshot | null>;
+
+  /**
+   * Preço/liquidez ATUAIS de VÁRIOS tokens de uma MESMA chain, em LOTE.
+   * Deve custar muito menos que N chamadas single (endpoint batch + cache):
+   * é o caminho preferido para métricas como sobrevida. Best-effort: mint
+   * ausente/indisponível → `null` no Map. Todo mint pedido está presente no Map.
+   */
+  fetchTokenSnapshots(
+    chain: Chain,
+    mints: string[],
+  ): Promise<Map<string, TokenSnapshot | null>>;
 }

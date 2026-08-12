@@ -1,5 +1,5 @@
-import { Injectable, ExecutionContext } from '@nestjs/common';
-import { CacheInterceptor } from '@nestjs/cache-manager';
+import { Injectable, ExecutionContext, Inject } from '@nestjs/common';
+import { CacheInterceptor, CACHE_MANAGER } from '@nestjs/cache-manager';
 import { NO_CACHE } from '../decorators/cache.decorator';
 import { Reflector } from '@nestjs/core';
 import { Cache } from 'cache-manager';
@@ -10,7 +10,12 @@ type RequestWithUser = {
 
 @Injectable()
 export class HttpCacheInterceptor extends CacheInterceptor {
-  constructor(cacheManager: Cache, reflector: Reflector) {
+  // @Inject explícito: ao sobrescrever o construtor da base, os metadados de DI
+  // do CACHE_MANAGER se perdem — sem isto o Nest não resolve o cacheManager.
+  constructor(
+    @Inject(CACHE_MANAGER) cacheManager: Cache,
+    reflector: Reflector,
+  ) {
     super(cacheManager, reflector);
   }
 

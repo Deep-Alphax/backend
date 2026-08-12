@@ -117,6 +117,37 @@ describe('MoralisProvider', () => {
     expect(calledUrl).toContain('solana-gateway.moralis.io');
   });
 
+  it('fetchTokenSnapshots EVM: 1 POST batch, mapeia por endereço (case-insensitive) e ausente → null', async () => {
+    const batch = [
+      { tokenAddress: '0xTOK', usdPrice: '1.5', pairTotalLiquidityUsd: '1000' },
+    ];
+    const http: any = {
+      get: jest.fn(),
+      post: jest.fn().mockReturnValue(of({ data: batch })),
+    };
+    const config: any = { get: (k: string) => (k === 'MORALIS_API_KEY' ? 'key' : undefined) };
+    const provider = new MoralisProvider(config, http);
+
+    const m = await provider.fetchTokenSnapshots(Chain.ETHEREUM, ['0xtok', '0xmissing']);
+
+    expect(http.post).toHaveBeenCalledTimes(1); // batch, não 1 GET por token
+    expect(http.get).not.toHaveBeenCalled();
+    expect(m.get('0xtok')).toEqual({ priceUsd: '1.5', liquidityUsd: '1000' });
+    expect(m.get('0xmissing')).toBeNull();
+  });
+
+  it('fetchTokenSnapshots sem API key devolve null p/ todos sem chamar a rede', async () => {
+    const http: any = { get: jest.fn(), post: jest.fn() };
+    const config: any = { get: () => undefined };
+    const provider = new MoralisProvider(config, http);
+
+    const m = await provider.fetchTokenSnapshots(Chain.ETHEREUM, ['0xa', '0xb']);
+    expect(m.get('0xa')).toBeNull();
+    expect(m.get('0xb')).toBeNull();
+    expect(http.post).not.toHaveBeenCalled();
+    expect(http.get).not.toHaveBeenCalled();
+  });
+
   it('enriquece a taxa Solana com meta.fee do RPC (lamports → SOL → USD)', async () => {
     const WSOL = 'So11111111111111111111111111111111111111112';
     const data = {
