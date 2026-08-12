@@ -1,5 +1,6 @@
 import { SyncStatus, TradeSide, ChainType, Chain, WalletKind } from '@prisma/client';
 import { WalletSyncService } from './wallet-sync.service';
+import { ProviderRequestError } from '../providers/market-data-provider.interface';
 
 function makeService() {
   const client = {
@@ -121,6 +122,68 @@ describe('WalletSyncService', () => {
     const lastUpdate = client.wallet.update.mock.calls[client.wallet.update.mock.calls.length - 1][0].data;
     expect(lastUpdate.syncStatus).toBe(SyncStatus.ERROR);
     expect(lastUpdate.syncError).toContain('boom');
+  });
+
+  it('falha TRANSITÓRIA (429): incrementa tentativa e agenda retry (backoff futuro)', async () => {
+    const { service, client, provider } = makeService();
+    provider.fetchSwaps.mockRejectedValueOnce(new ProviderRequestError('limite', 429));
+
+    await expect(service.syncWallet(wallet)).rejects.toBeInstanceOf(ProviderRequestError);
+    const data = client.wallet.update.mock.calls[client.wallet.update.mock.calls.length - 1][0].data;
+    expect(data.syncStatus).toBe(SyncStatus.ERROR);
+    expect(data.syncAttempts).toBe(1);
+    expect(data.nextRetryAt).toBeInstanceOf(Date);
+    expect(data.nextRetryAt.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('falha PERMANENTE (400): NÃO agenda retry (nextRetryAt=null)', async () => {
+    const { service, client, provider } = makeService();
+    provider.fetchSwaps.mockRejectedValueOnce(new ProviderRequestError('endereço inválido', 400));
+
+    await expect(service.syncWallet(wallet)).rejects.toBeInstanceOf(ProviderRequestError);
+    const data = client.wallet.update.mock.calls[client.wallet.update.mock.calls.length - 1][0].data;
+    expect(data.syncStatus).toBe(SyncStatus.ERROR);
+    expect(data.nextRetryAt).toBeNull();
+  });
+
+  it('teto de tentativas: transitório na última tentativa não reagenda', async () => {
+    const { service, client, provider } = makeService();
+    provider.fetchSwaps.mockRejectedValueOnce(new ProviderRequestError('5xx', 503));
+
+    // syncAttempts=5 → a 6ª falha atinge o teto (MAX=6): sem novo retry.
+    await expect(
+      service.syncWallet({ ...wallet, syncAttempts: 5 }),
+    ).rejects.toBeInstanceOf(ProviderRequestError);
+    const data = client.wallet.update.mock.calls[client.wallet.update.mock.calls.length - 1][0].data;
+    expect(data.syncAttempts).toBe(6);
+    expect(data.nextRetryAt).toBeNull();
+  });
+
+  it('sucesso zera o estado de retry (syncAttempts=0, nextRetryAt=null)', async () => {
+    const { service, client, provider } = makeService();
+    provider.fetchSwaps.mockResolvedValueOnce({ swaps: [mkSwap(0)], nextCursor: null });
+    client.trade.createMany.mockResolvedValueOnce({ count: 1 });
+
+    await service.syncWallet({ ...wallet, syncAttempts: 3 });
+    const data = client.wallet.update.mock.calls[client.wallet.update.mock.calls.length - 1][0].data;
+    expect(data.syncStatus).toBe(SyncStatus.SYNCED);
+    expect(data.syncAttempts).toBe(0);
+    expect(data.nextRetryAt).toBeNull();
+  });
+
+  it('drainPending também busca carteiras ERROR com backoff vencido', async () => {
+    const { service, client } = makeService();
+    client.wallet.findMany.mockResolvedValue([]);
+
+    await service.drainPending();
+    const where = client.wallet.findMany.mock.calls[0][0].where;
+    expect(where.isActive).toBe(true);
+    expect(where.OR).toEqual(
+      expect.arrayContaining([
+        { syncStatus: SyncStatus.PENDING },
+        expect.objectContaining({ syncStatus: SyncStatus.ERROR }),
+      ]),
+    );
   });
 
   it('INCREMENTAL: passa sinceBlockTime=lastSyncedAt quando já sincronizou (cursor null)', async () => {

@@ -4,6 +4,22 @@ import { Chain, TradeSide } from '@prisma/client';
 export const MARKET_DATA_PROVIDER = Symbol('MARKET_DATA_PROVIDER');
 
 /**
+ * Erro de requisição a um provider, carregando o HTTP `status` para permitir que
+ * o consumidor (ingestão) classifique a falha: transitória (401/429/5xx/timeout →
+ * vale retentar com backoff) vs permanente (400/404/422 de dado → não insistir).
+ * `status` ausente = erro de rede/timeout (tratado como transitório).
+ */
+export class ProviderRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = 'ProviderRequestError';
+  }
+}
+
+/**
  * Swap normalizado, agnóstico de provider e de chain. Valores monetários e de
  * quantidade viajam como STRING decimal (nunca number) — o persistidor converte
  * para Prisma.Decimal, sem perda de precisão.

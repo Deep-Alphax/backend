@@ -18,6 +18,7 @@ import {
   FetchOhlcParams,
   OhlcCandle,
   TokenSnapshot,
+  ProviderRequestError,
 } from './market-data-provider.interface';
 
 /** Chain → parâmetro `chain` (hex) da API EVM da Moralis. */
@@ -103,6 +104,10 @@ export class MoralisProvider implements MarketDataProvider {
     const data = await this.get(url, query);
     const rows: any[] = Array.isArray(data?.result) ? data.result : [];
     const swaps = rows.map((r) => this.mapEvmSwap(r)).filter((s): s is ProviderSwap => s !== null);
+    this.logger.log(
+      `Moralis EVM swaps ${params.chain} ${params.address}: ${rows.length} brutos → ${swaps.length} mapeados` +
+        ` (nextCursor=${data?.cursor ? 'sim' : 'não'})`,
+    );
     return { swaps, nextCursor: data?.cursor || null };
   }
 
@@ -120,6 +125,10 @@ export class MoralisProvider implements MarketDataProvider {
     const data = await this.get(url, query);
     const rows: any[] = Array.isArray(data?.result) ? data.result : [];
     const swaps = rows.map((r) => this.mapSolanaSwap(r)).filter((s): s is ProviderSwap => s !== null);
+    this.logger.log(
+      `Moralis Solana swaps ${params.address}: ${rows.length} brutos → ${swaps.length} mapeados` +
+        ` (nextCursor=${data?.cursor ? 'sim' : 'não'})`,
+    );
     // Moralis não traz taxa; enriquece com a fee on-chain (meta.fee) via RPC.
     await this.enrichSolanaFees(swaps);
     return { swaps, nextCursor: data?.cursor || null };
@@ -516,8 +525,11 @@ export class MoralisProvider implements MarketDataProvider {
     } catch (err: any) {
       const status = err?.response?.status;
       this.logger.error(`Moralis GET ${url} falhou (status=${status}): ${err?.message}`);
-      // 4xx de dados (ex.: endereço inválido) não deve virar retry infinito no worker.
-      throw new ServiceUnavailableException(`Falha ao consultar a Moralis (status=${status ?? 'n/a'})`);
+      // Propaga o status p/ a ingestão decidir retry (transitório) vs desistir (dado permanente).
+      throw new ProviderRequestError(
+        `Falha ao consultar a Moralis (status=${status ?? 'n/a'})`,
+        status,
+      );
     }
   }
 

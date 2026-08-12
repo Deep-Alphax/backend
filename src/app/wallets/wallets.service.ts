@@ -230,7 +230,13 @@ export class WalletsService {
     await this.assertOwnership(userId, id);
     return this.prisma.getWriteClient().wallet.update({
       where: { id },
-      data: { syncStatus: SyncStatus.PENDING, syncError: null },
+      // Resync manual zera o orçamento de retry (backoff) — "tentar de novo" de verdade.
+      data: {
+        syncStatus: SyncStatus.PENDING,
+        syncError: null,
+        syncAttempts: 0,
+        nextRetryAt: null,
+      },
       select: WALLET_SELECT,
     });
   }

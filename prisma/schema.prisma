@@ -137,6 +137,12 @@ model Wallet {
   lastSyncedAt DateTime?
   firstTxAt    DateTime? // 1ª atividade on-chain conhecida (limite do histórico)
 
+  // Auto-recuperação de falhas transitórias do provider (401/429/5xx/timeout):
+  // tentativas consecutivas falhas + quando o cron pode retentar (backoff). Zeram no
+  // sucesso. Falha permanente (400/404 de dado) ou teto de tentativas → nextRetryAt=null.
+  syncAttempts Int       @default(0)
+  nextRetryAt  DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -150,6 +156,8 @@ model Wallet {
   @@unique([userId, chain, addressNorm])
   @@index([userId])
   @@index([syncStatus])
+  // Cobre a varredura do cron por carteiras em ERROR prontas p/ retry (syncStatus+nextRetryAt).
+  @@index([syncStatus, nextRetryAt])
   @@index([sourceId])
 }
 
