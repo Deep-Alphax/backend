@@ -5,7 +5,7 @@
   "author": "deep-alpha",
   "private": true,
   "license": "MIT",
-  "packageManager": "pnpm@11.21.0",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "nest build",
     "build:docker": "nest build --builder swc",
