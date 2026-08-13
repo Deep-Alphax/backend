@@ -10,6 +10,7 @@ import {
   FetchSwapsResult,
   ProviderSwap,
   ProviderRequestError,
+  TokenSnapshot,
 } from './market-data-provider.interface';
 
 /**
@@ -24,8 +25,12 @@ import {
  *
  * PREÇO USD: o Helius não traz preço. A perna quote é SOL (WSOL) na esmagadora
  * maioria dos trades de memecoin; derivamos `usdValue` = SOL × preço do SOL no dia
- * (candle diário do WSOL via Moralis, cacheado). Quote em stablecoin vira valor
+ * (histórico diário via CoinGecko, cacheado por dia). Quote em stablecoin vira valor
  * direto. Sem preço do dia → `priceResolved=false` (alimenta o campo de confiança).
+ *
+ * SEM MORALIS: preço do SOL (histórico via CoinGecko, atual via DexScreener), saldo
+ * e snapshots de token (via DexScreener) — tudo em fontes grátis e sem key. A Moralis
+ * fica reservada só ao que ela é indispensável (swaps/net-worth EVM).
  */
 @Injectable()
 export class HeliusSolanaProvider {
@@ -52,7 +57,8 @@ export class HeliusSolanaProvider {
     @Optional() private readonly cache?: CacheRedisService,
   ) {
     this.apiKey = this.config.get<string>('HELIUS_API_KEY') ?? '';
-    this.base = this.config.get<string>('HELIUS_BASE') ?? 'https://api.helius.xyz';
+    this.base =
+      this.config.get<string>('HELIUS_BASE') ?? 'https://api.helius.xyz';
   }
 
   async fetchSwaps(params: FetchSwapsParams): Promise<FetchSwapsResult> {
@@ -71,7 +77,9 @@ export class HeliusSolanaProvider {
     const txs = await this.get(url, query);
     const rows: any[] = Array.isArray(txs) ? txs : [];
 
-    const sinceMs = params.sinceBlockTime ? params.sinceBlockTime.getTime() : null;
+    const sinceMs = params.sinceBlockTime
+      ? params.sinceBlockTime.getTime()
+      : null;
     const swaps: ProviderSwap[] = [];
     let reachedOld = false;
     let lastSig: string | null = null;
@@ -116,15 +124,21 @@ export class HeliusSolanaProvider {
     for (const tt of t?.tokenTransfers ?? []) {
       const amt = Number(tt?.tokenAmount);
       if (!Number.isFinite(amt) || amt === 0) continue;
-      if (tt.fromUserAccount === address) net.set(tt.mint, (net.get(tt.mint) ?? 0) - amt);
-      if (tt.toUserAccount === address) net.set(tt.mint, (net.get(tt.mint) ?? 0) + amt);
+      if (tt.fromUserAccount === address)
+        net.set(tt.mint, (net.get(tt.mint) ?? 0) - amt);
+      if (tt.toUserAccount === address)
+        net.set(tt.mint, (net.get(tt.mint) ?? 0) + amt);
     }
 
     // base = token não-quote com maior movimento absoluto.
     let baseMint: string | null = null;
     let baseAbs = 0;
     for (const [m, d] of net) {
-      if (m === HeliusSolanaProvider.WSOL || HeliusSolanaProvider.STABLES.has(m)) continue;
+      if (
+        m === HeliusSolanaProvider.WSOL ||
+        HeliusSolanaProvider.STABLES.has(m)
+      )
+        continue;
       if (Math.abs(d) > baseAbs) {
         baseAbs = Math.abs(d);
         baseMint = m;
@@ -135,7 +149,10 @@ export class HeliusSolanaProvider {
     // quote: WSOL/stable presente nos tokenTransfers; senão, SOL nativo líquido.
     let quoteMint: string | null = null;
     for (const m of net.keys()) {
-      if (m === HeliusSolanaProvider.WSOL || HeliusSolanaProvider.STABLES.has(m)) {
+      if (
+        m === HeliusSolanaProvider.WSOL ||
+        HeliusSolanaProvider.STABLES.has(m)
+      ) {
         quoteMint = m;
         break;
       }
@@ -157,8 +174,7 @@ export class HeliusSolanaProvider {
 
     const baseDelta = net.get(baseMint) ?? 0;
     const side = baseDelta > 0 ? TradeSide.BUY : TradeSide.SELL;
-    const feeNative =
-      t?.feePayer === address ? (Number(t?.fee) || 0) / 1e9 : 0;
+    const feeNative = t?.feePayer === address ? (Number(t?.fee) || 0) / 1e9 : 0;
 
     return {
       txHash: String(t?.signature ?? ''),
@@ -180,6 +196,116 @@ export class HeliusSolanaProvider {
     };
   }
 
+  // ─────────────────── Saldo atual (RPC + DexScreener, SEM Moralis) ───────────────────
+
+  /** Programas de token SPL (clássico + Token-2022) para listar os holdings. */
+  private static readonly TOKEN_PROGRAM =
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+  private static readonly TOKEN_2022 =
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+
+  /** URL RPC: Helius (com key) se houver; senão o SOLANA_RPC_URL público. */
+  private rpcUrl(): string {
+    return this.apiKey
+      ? `https://mainnet.helius-rpc.com/?api-key=${this.apiKey}`
+      : (this.config.get<string>('SOLANA_RPC_URL') ??
+          'https://api.mainnet-beta.solana.com');
+  }
+
+  private async rpcCall(method: string, params: unknown[]): Promise<any> {
+    const resp = await firstValueFrom(
+      this.http.post(this.rpcUrl(), { jsonrpc: '2.0', id: 1, method, params }, {
+        timeout: 15000,
+      } as any),
+    );
+    return resp.data?.result;
+  }
+
+  /**
+   * Saldo ATUAL em USD SEM Moralis: holdings via RPC (getBalance +
+   * getTokenAccountsByOwner, SPL clássico + Token-2022) × preço via DexScreener
+   * (grátis, sem key). Best-effort → null em falha.
+   */
+  async fetchWalletBalanceUsd(
+    _chain: Chain,
+    address: string,
+  ): Promise<string | null> {
+    try {
+      const [bal, spl, spl22] = await Promise.all([
+        this.rpcCall('getBalance', [address]),
+        this.rpcCall('getTokenAccountsByOwner', [
+          address,
+          { programId: HeliusSolanaProvider.TOKEN_PROGRAM },
+          { encoding: 'jsonParsed' },
+        ]),
+        this.rpcCall('getTokenAccountsByOwner', [
+          address,
+          { programId: HeliusSolanaProvider.TOKEN_2022 },
+          { encoding: 'jsonParsed' },
+        ]),
+      ]);
+
+      const solAmount = Number(bal?.value ?? 0) / 1e9;
+      const holdings = new Map<string, number>();
+      for (const acc of [...(spl?.value ?? []), ...(spl22?.value ?? [])]) {
+        const info = acc?.account?.data?.parsed?.info;
+        const mint = info?.mint;
+        const amt = Number(info?.tokenAmount?.uiAmount ?? 0);
+        if (mint && amt > 0)
+          holdings.set(mint, (holdings.get(mint) ?? 0) + amt);
+      }
+
+      const prices = await this.dexScreenerPrices([
+        HeliusSolanaProvider.WSOL,
+        ...holdings.keys(),
+      ]);
+      let total = solAmount * (prices.get(HeliusSolanaProvider.WSOL) ?? 0);
+      for (const [mint, amt] of holdings)
+        total += amt * (prices.get(mint) ?? 0);
+
+      return Number.isFinite(total) ? total.toFixed(2) : null;
+    } catch (err: any) {
+      this.logger.warn(
+        `Balanço Solana (RPC/DexScreener) falhou (${address}): ${err?.message}`,
+      );
+      return null;
+    }
+  }
+
+  /** Preço USD por mint via DexScreener (lotes de 30). Usa o par de MAIOR liquidez. */
+  private async dexScreenerPrices(
+    mints: string[],
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const bestLiq = new Map<string, number>();
+    const uniq = [...new Set(mints)].slice(0, 300);
+    for (let i = 0; i < uniq.length; i += 30) {
+      const chunk = uniq.slice(i, i + 30);
+      try {
+        const resp = await firstValueFrom(
+          this.http.get(
+            `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`,
+            { timeout: 12000 } as any,
+          ),
+        );
+        const pairs: any[] = resp.data?.pairs ?? [];
+        for (const p of pairs) {
+          const mint = p?.baseToken?.address;
+          const price = Number(p?.priceUsd);
+          const liq = Number(p?.liquidity?.usd ?? 0);
+          if (!mint || !Number.isFinite(price) || price <= 0) continue;
+          if (liq > (bestLiq.get(mint) ?? -1)) {
+            bestLiq.set(mint, liq);
+            out.set(mint, price);
+          }
+        }
+      } catch {
+        /* lote falhou → mints ficam sem preço (0) */
+      }
+    }
+    return out;
+  }
+
   // ─────────────────────────── Preço USD (perna SOL × preço do SOL no dia) ───────────────────────────
 
   private async priceInUsd(swaps: ProviderSwap[]): Promise<void> {
@@ -198,7 +324,9 @@ export class HeliusSolanaProvider {
       }
     }
 
-    const solQuoted = swaps.filter((s) => s.quoteMint === HeliusSolanaProvider.WSOL);
+    const solQuoted = swaps.filter(
+      (s) => s.quoteMint === HeliusSolanaProvider.WSOL,
+    );
     if (!solQuoted.length) return;
 
     const times = solQuoted.map((s) => s.blockTime.getTime());
@@ -229,7 +357,10 @@ export class HeliusSolanaProvider {
    * refazem chamada. Só bate na Moralis (OHLC diário do WSOL) para os dias que
    * faltam, num único intervalo contíguo — corta drasticamente o custo no backfill.
    */
-  private async solUsdByDay(from: Date, to: Date): Promise<Map<string, number>> {
+  private async solUsdByDay(
+    from: Date,
+    to: Date,
+  ): Promise<Map<string, number>> {
     const out = new Map<string, number>();
     const days = this.enumerateDays(from, to);
     if (days.length === 0) return out;
@@ -281,8 +412,16 @@ export class HeliusSolanaProvider {
   /** Lista de dias (YYYY-MM-DD, UTC) no intervalo [from, to], inclusive. Bounded. */
   private enumerateDays(from: Date, to: Date): string[] {
     const days: string[] = [];
-    const start = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
-    const end = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+    const start = Date.UTC(
+      from.getUTCFullYear(),
+      from.getUTCMonth(),
+      from.getUTCDate(),
+    );
+    const end = Date.UTC(
+      to.getUTCFullYear(),
+      to.getUTCMonth(),
+      to.getUTCDate(),
+    );
     for (let t = start; t <= end; t += 86_400_000) {
       days.push(new Date(t).toISOString().slice(0, 10));
     }
@@ -316,7 +455,9 @@ export class HeliusSolanaProvider {
       return resp.data;
     } catch (err: any) {
       const status = err?.response?.status;
-      this.logger.error(`Helius GET ${url} falhou (status=${status}): ${err?.message}`);
+      this.logger.error(
+        `Helius GET ${url} falhou (status=${status}): ${err?.message}`,
+      );
       // Propaga o status p/ a ingestão classificar retry (transitório) vs desistir.
       throw new ProviderRequestError(
         `Falha ao consultar o Helius (status=${status ?? 'n/a'})`,

@@ -67,14 +67,18 @@ export class MoralisProvider implements MarketDataProvider {
   ) {
     this.apiKey = this.config.get<string>('MORALIS_API_KEY') ?? '';
     this.evmBase =
-      this.config.get<string>('MORALIS_EVM_BASE') ?? 'https://deep-index.moralis.io/api/v2.2';
+      this.config.get<string>('MORALIS_EVM_BASE') ??
+      'https://deep-index.moralis.io/api/v2.2';
     this.solanaBase =
-      this.config.get<string>('MORALIS_SOLANA_BASE') ?? 'https://solana-gateway.moralis.io';
-    this.solanaNetwork = this.config.get<string>('MORALIS_SOLANA_NETWORK') ?? 'mainnet';
+      this.config.get<string>('MORALIS_SOLANA_BASE') ??
+      'https://solana-gateway.moralis.io';
+    this.solanaNetwork =
+      this.config.get<string>('MORALIS_SOLANA_NETWORK') ?? 'mainnet';
     // RPC Solana p/ enriquecer a taxa on-chain (meta.fee). O público é rate-limited
     // e NÃO é arquival (txs antigas retornam null) — em prod usar Helius/QuickNode.
     this.solanaRpc =
-      this.config.get<string>('SOLANA_RPC_URL') ?? 'https://api.mainnet-beta.solana.com';
+      this.config.get<string>('SOLANA_RPC_URL') ??
+      'https://api.mainnet-beta.solana.com';
   }
 
   async fetchSwaps(params: FetchSwapsParams): Promise<FetchSwapsResult> {
@@ -88,9 +92,14 @@ export class MoralisProvider implements MarketDataProvider {
 
   // ─────────────────────────── EVM ───────────────────────────
 
-  private async fetchEvmSwaps(params: FetchSwapsParams): Promise<FetchSwapsResult> {
+  private async fetchEvmSwaps(
+    params: FetchSwapsParams,
+  ): Promise<FetchSwapsResult> {
     const chainParam = MORALIS_EVM_CHAIN[params.chain];
-    if (!chainParam) throw new ServiceUnavailableException(`Chain EVM não suportada: ${params.chain}`);
+    if (!chainParam)
+      throw new ServiceUnavailableException(
+        `Chain EVM não suportada: ${params.chain}`,
+      );
 
     const url = `${this.evmBase}/wallets/${params.address}/swaps`;
     const query: Record<string, string> = {
@@ -99,11 +108,14 @@ export class MoralisProvider implements MarketDataProvider {
       limit: String(params.limit ?? 100),
     };
     if (params.cursor) query.cursor = params.cursor;
-    if (params.sinceBlockTime) query.fromDate = params.sinceBlockTime.toISOString();
+    if (params.sinceBlockTime)
+      query.fromDate = params.sinceBlockTime.toISOString();
 
     const data = await this.get(url, query);
     const rows: any[] = Array.isArray(data?.result) ? data.result : [];
-    const swaps = rows.map((r) => this.mapEvmSwap(r)).filter((s): s is ProviderSwap => s !== null);
+    const swaps = rows
+      .map((r) => this.mapEvmSwap(r))
+      .filter((s): s is ProviderSwap => s !== null);
     this.logger.log(
       `Moralis EVM swaps ${params.chain} ${params.address}: ${rows.length} brutos → ${swaps.length} mapeados` +
         ` (nextCursor=${data?.cursor ? 'sim' : 'não'})`,
@@ -113,18 +125,23 @@ export class MoralisProvider implements MarketDataProvider {
 
   // ─────────────────────────── Solana ───────────────────────────
 
-  private async fetchSolanaSwaps(params: FetchSwapsParams): Promise<FetchSwapsResult> {
+  private async fetchSolanaSwaps(
+    params: FetchSwapsParams,
+  ): Promise<FetchSwapsResult> {
     const url = `${this.solanaBase}/account/${this.solanaNetwork}/${params.address}/swaps`;
     const query: Record<string, string> = {
       order: 'ASC',
       limit: String(params.limit ?? 100),
     };
     if (params.cursor) query.cursor = params.cursor;
-    if (params.sinceBlockTime) query.fromDate = params.sinceBlockTime.toISOString();
+    if (params.sinceBlockTime)
+      query.fromDate = params.sinceBlockTime.toISOString();
 
     const data = await this.get(url, query);
     const rows: any[] = Array.isArray(data?.result) ? data.result : [];
-    const swaps = rows.map((r) => this.mapSolanaSwap(r)).filter((s): s is ProviderSwap => s !== null);
+    const swaps = rows
+      .map((r) => this.mapSolanaSwap(r))
+      .filter((s): s is ProviderSwap => s !== null);
     this.logger.log(
       `Moralis Solana swaps ${params.address}: ${rows.length} brutos → ${swaps.length} mapeados` +
         ` (nextCursor=${data?.cursor ? 'sim' : 'não'})`,
@@ -206,7 +223,9 @@ export class MoralisProvider implements MarketDataProvider {
             await sleep(400 * (attempt + 1)); // backoff
             continue;
           }
-          this.logger.warn(`RPC Solana getTransaction (fee) falhou (status=${status}): ${err?.message}`);
+          this.logger.warn(
+            `RPC Solana getTransaction (fee) falhou (status=${status}): ${err?.message}`,
+          );
         }
       }
       // Pacing entre lotes p/ ser gentil com o RPC público.
@@ -228,7 +247,9 @@ export class MoralisProvider implements MarketDataProvider {
         ? await this.fetchEvmOhlc(params)
         : await this.fetchSolanaOhlc(params);
     } catch (err: any) {
-      this.logger.warn(`OHLC ${params.mint} (best-effort) falhou: ${err?.message}`);
+      this.logger.warn(
+        `OHLC ${params.mint} (best-effort) falhou: ${err?.message}`,
+      );
       return [];
     }
   }
@@ -236,22 +257,30 @@ export class MoralisProvider implements MarketDataProvider {
   private async fetchEvmOhlc(params: FetchOhlcParams): Promise<OhlcCandle[]> {
     const chainParam = MORALIS_EVM_CHAIN[params.chain];
     if (!chainParam) return [];
-    const pairs = await this.getSafe(`${this.evmBase}/erc20/${params.mint}/pairs`, {
-      chain: chainParam,
-    });
+    const pairs = await this.getSafe(
+      `${this.evmBase}/erc20/${params.mint}/pairs`,
+      {
+        chain: chainParam,
+      },
+    );
     const pairAddress = this.bestPairAddress(pairs);
     if (!pairAddress) return [];
-    const data = await this.getSafe(`${this.evmBase}/pairs/${pairAddress}/ohlcv`, {
-      chain: chainParam,
-      timeframe: params.timeframe,
-      currency: 'usd',
-      fromDate: params.from.toISOString(),
-      toDate: params.to.toISOString(),
-    });
+    const data = await this.getSafe(
+      `${this.evmBase}/pairs/${pairAddress}/ohlcv`,
+      {
+        chain: chainParam,
+        timeframe: params.timeframe,
+        currency: 'usd',
+        fromDate: params.from.toISOString(),
+        toDate: params.to.toISOString(),
+      },
+    );
     return this.mapOhlc(data?.result ?? data);
   }
 
-  private async fetchSolanaOhlc(params: FetchOhlcParams): Promise<OhlcCandle[]> {
+  private async fetchSolanaOhlc(
+    params: FetchOhlcParams,
+  ): Promise<OhlcCandle[]> {
     const base = `${this.solanaBase}/token/${this.solanaNetwork}`;
     const pairs = await this.getSafe(`${base}/${params.mint}/pairs`, {});
     const pairAddress = this.bestPairAddress(pairs);
@@ -265,9 +294,41 @@ export class MoralisProvider implements MarketDataProvider {
     return this.mapOhlc(data?.result ?? data);
   }
 
-  async fetchTokenSnapshot(chain: Chain, mint: string): Promise<TokenSnapshot | null> {
+  async fetchTokenSnapshot(
+    chain: Chain,
+    mint: string,
+  ): Promise<TokenSnapshot | null> {
     const m = await this.fetchTokenSnapshots(chain, [mint]);
     return m.get(mint) ?? null;
+  }
+
+  /**
+   * Saldo USD atual — SÓ EVM (net-worth consolidado). Solana é servido pelo Helius
+   * (RPC + DexScreener) para minimizar o uso da Moralis. Best-effort → null.
+   */
+  async fetchWalletBalanceUsd(
+    chain: Chain,
+    address: string,
+  ): Promise<string | null> {
+    const chainParam = MORALIS_EVM_CHAIN[chain];
+    if (!chainParam) return null; // Solana (ou chain não suportada) → não usa Moralis
+    try {
+      const data = await this.get(
+        `${this.evmBase}/wallets/${address}/net-worth`,
+        {
+          'chains[]': chainParam,
+          exclude_spam: 'true',
+          exclude_unverified_contracts: 'true',
+        },
+      );
+      const usd = data?.total_networth_usd;
+      return usd != null ? String(usd) : null;
+    } catch (err: any) {
+      this.logger.warn(
+        `Net-worth EVM (${chain} ${address}) falhou: ${err?.message}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -342,7 +403,9 @@ export class MoralisProvider implements MarketDataProvider {
           : [];
       const byAddr = new Map<string, any>();
       for (const r of rows) {
-        const a = String(r?.tokenAddress ?? r?.token_address ?? '').toLowerCase();
+        const a = String(
+          r?.tokenAddress ?? r?.token_address ?? '',
+        ).toLowerCase();
         if (a) byAddr.set(a, r);
       }
       for (const mint of chunk) {
@@ -465,7 +528,10 @@ export class MoralisProvider implements MarketDataProvider {
   }
 
   /** GET que NÃO lança (best-effort): erro/ausência → null. */
-  private async getSafe(url: string, params: Record<string, string>): Promise<any | null> {
+  private async getSafe(
+    url: string,
+    params: Record<string, string>,
+  ): Promise<any | null> {
     try {
       const resp = await firstValueFrom(
         this.http.get(url, {
@@ -524,7 +590,9 @@ export class MoralisProvider implements MarketDataProvider {
       return resp.data;
     } catch (err: any) {
       const status = err?.response?.status;
-      this.logger.error(`Moralis GET ${url} falhou (status=${status}): ${err?.message}`);
+      this.logger.error(
+        `Moralis GET ${url} falhou (status=${status}): ${err?.message}`,
+      );
       // Propaga o status p/ a ingestão decidir retry (transitório) vs desistir (dado permanente).
       throw new ProviderRequestError(
         `Falha ao consultar a Moralis (status=${status ?? 'n/a'})`,
@@ -543,7 +611,8 @@ export class MoralisProvider implements MarketDataProvider {
    */
   private mapEvmSwap(r: any): ProviderSwap | null {
     const type = String(r?.transactionType ?? '').toLowerCase();
-    const side: TradeSide | null = type === 'buy' ? TradeSide.BUY : type === 'sell' ? TradeSide.SELL : null;
+    const side: TradeSide | null =
+      type === 'buy' ? TradeSide.BUY : type === 'sell' ? TradeSide.SELL : null;
     const txHash = r?.transactionHash ?? r?.transaction_hash ?? r?.hash;
     const blockTs = r?.blockTimestamp ?? r?.block_timestamp;
     if (!side || !txHash || !blockTs) return null;
@@ -556,7 +625,10 @@ export class MoralisProvider implements MarketDataProvider {
 
     const priceUsd = this.num(base?.usdPrice);
     const baseAmount = this.abs(base?.amount);
-    const usdValue = this.num(base?.usdAmount) ?? this.num(r?.totalValueUsd) ?? this.mul(baseAmount, priceUsd);
+    const usdValue =
+      this.num(base?.usdAmount) ??
+      this.num(r?.totalValueUsd) ??
+      this.mul(baseAmount, priceUsd);
 
     return {
       txHash: String(txHash),
@@ -580,7 +652,8 @@ export class MoralisProvider implements MarketDataProvider {
   /** Mapeia um swap Solana (Solana Gateway) → ProviderSwap. Mesmo modelo bought/sold. */
   private mapSolanaSwap(r: any): ProviderSwap | null {
     const type = String(r?.transactionType ?? '').toLowerCase();
-    const side: TradeSide | null = type === 'buy' ? TradeSide.BUY : type === 'sell' ? TradeSide.SELL : null;
+    const side: TradeSide | null =
+      type === 'buy' ? TradeSide.BUY : type === 'sell' ? TradeSide.SELL : null;
     const txHash = r?.transactionHash ?? r?.signature ?? r?.txHash;
     const blockTs = r?.blockTimestamp ?? r?.blockTime;
     if (!side || !txHash || !blockTs) return null;
@@ -592,11 +665,16 @@ export class MoralisProvider implements MarketDataProvider {
 
     const priceUsd = this.num(base?.usdPrice);
     const baseAmount = this.abs(base?.amount);
-    const usdValue = this.num(base?.usdAmount) ?? this.num(r?.totalValueUsd) ?? this.mul(baseAmount, priceUsd);
+    const usdValue =
+      this.num(base?.usdAmount) ??
+      this.num(r?.totalValueUsd) ??
+      this.mul(baseAmount, priceUsd);
 
     return {
       txHash: String(txHash),
-      blockTime: new Date(typeof blockTs === 'number' ? blockTs * 1000 : blockTs),
+      blockTime: new Date(
+        typeof blockTs === 'number' ? blockTs * 1000 : blockTs,
+      ),
       side,
       baseMint: String(base?.address ?? base?.mint ?? ''),
       baseSymbol: base?.symbol ?? null,

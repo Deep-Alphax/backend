@@ -38,7 +38,10 @@ export class CompositeMarketDataProvider implements MarketDataProvider {
     return this.moralis.fetchOhlc(params);
   }
 
-  fetchTokenSnapshot(chain: Chain, mint: string): Promise<TokenSnapshot | null> {
+  fetchTokenSnapshot(
+    chain: Chain,
+    mint: string,
+  ): Promise<TokenSnapshot | null> {
     return this.moralis.fetchTokenSnapshot(chain, mint);
   }
 
@@ -47,5 +50,15 @@ export class CompositeMarketDataProvider implements MarketDataProvider {
     mints: string[],
   ): Promise<Map<string, TokenSnapshot | null>> {
     return this.moralis.fetchTokenSnapshots(chain, mints);
+  }
+
+  /**
+   * Saldo USD atual: Solana → Helius (RPC + DexScreener, SEM Moralis) para minimizar
+   * o uso da Moralis; EVM → Moralis (net-worth).
+   */
+  fetchWalletBalanceUsd(chain: Chain, address: string): Promise<string | null> {
+    return chainTypeOf(chain) === ChainType.SOLANA
+      ? this.helius.fetchWalletBalanceUsd(chain, address)
+      : this.moralis.fetchWalletBalanceUsd(chain, address);
   }
 }

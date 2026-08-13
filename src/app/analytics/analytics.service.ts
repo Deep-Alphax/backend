@@ -17,8 +17,9 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { computePnl, computeClosedPositions } from './pnl-calculator';
 import {
   computePeakMetrics,
-  buildBenchmark,
+  computeSolBenchmark,
   computeSurvival,
+  type SolTradeInput,
 } from './peak-engine';
 import { TradeInput, PnlResult } from './pnl-types';
 import {
@@ -83,6 +84,41 @@ export class AnalyticsService {
     // Cache do Bloco 2 (fail-open): sem Redis, recomputa sempre (comportamento antigo).
     @Optional() private readonly cache?: CacheRedisService,
   ) {}
+
+  /**
+   * Saldo ATUAL (USD) das carteiras OWN do usuário — holdings on-chain × preço, via
+   * provider. `walletId` escopa a uma carteira; sem ele, soma todas as OWN. Sem
+   * provider (sem MORALIS_API_KEY) → null. Best-effort: falha por carteira vira 0.
+   */
+  async getWalletBalanceUsd(
+    userId: string,
+    walletId?: string,
+  ): Promise<{ balanceUsd: string | null }> {
+    if (!this.provider?.fetchWalletBalanceUsd) return { balanceUsd: null };
+
+    const wallets = await this.prisma.getReadClient().wallet.findMany({
+      where: {
+        userId,
+        kind: WalletKind.OWN,
+        ...(walletId ? { id: walletId } : {}),
+      },
+      select: { chain: true, address: true },
+    });
+    if (wallets.length === 0) return { balanceUsd: null };
+
+    const results = await Promise.all(
+      wallets.map((w) =>
+        this.provider!.fetchWalletBalanceUsd!(w.chain, w.address).catch(
+          () => null,
+        ),
+      ),
+    );
+    const values = results.filter((v): v is string => v != null);
+    if (values.length === 0) return { balanceUsd: null };
+
+    const total = values.reduce((acc, v) => acc + Number(v), 0);
+    return { balanceUsd: Number.isFinite(total) ? total.toFixed(2) : null };
+  }
 
   /** Métricas de UMA carteira do usuário (Bloco 1, com cache por snapshot). */
   async walletMetrics(
@@ -157,7 +193,6 @@ export class AnalyticsService {
       walletIds,
       period,
       tzOffsetMinutes,
-      base,
     ).catch((err) => {
       this.logger.warn(`Bloco 2 (histórico de preço) falhou: ${err?.message}`);
       return this.emptyExtras();
@@ -259,7 +294,6 @@ export class AnalyticsService {
     walletIds: string[],
     period: MetricPeriod,
     tzOffsetMinutes: number,
-    base: PnlResult,
   ): Promise<{ peaks: PeakMetrics; survival: Survival; benchmark: Benchmark }> {
     if (!this.provider || !this.candles || walletIds.length === 0)
       return this.emptyExtras();
@@ -292,6 +326,8 @@ export class AnalyticsService {
       select: {
         ...TRADE_SELECT,
         chainType: true,
+        quoteMint: true,
+        quoteAmount: true,
         wallet: { select: { chain: true } },
       },
       orderBy: { blockTime: 'asc' },
@@ -372,25 +408,33 @@ export class AnalyticsService {
     });
     const survival = computeSurvival(statuses);
 
-    // Benchmark: preço diário do SOL → capital acumulado medido em SOL.
+    // Benchmark "capital medido em SOL": SOL realizado DE VERDADE (FIFO nas pernas
+    // SOL dos trades) — não a conversão do PnL-USD ao preço de um dia. solByDate só
+    // serve p/ converter pernas em stablecoin ao preço do SOL do dia.
     let benchmark: Benchmark = { available: false, points: [] };
-    const points = base.capital.points;
-    if (points.length > 0) {
-      const from = new Date(`${points[0].date}T00:00:00Z`);
-      const to = new Date(`${points[points.length - 1].date}T23:59:59Z`);
+    if (rows.length > 0) {
       const solCandles = await this.candles.getCandles(
         ChainType.SOLANA,
         Chain.SOLANA,
         WSOL_MINT,
-        from,
-        to,
+        rows[0].blockTime,
+        rows[rows.length - 1].blockTime,
         '1d',
       );
       const solByDate = new Map<string, number>();
       for (const c of solCandles) {
         solByDate.set(new Date(c.timeMs).toISOString().slice(0, 10), c.close);
       }
-      benchmark = buildBenchmark(points, solByDate);
+      const solTrades: SolTradeInput[] = rows.map((r) => ({
+        side: r.side,
+        blockTimeMs: r.blockTime.getTime(),
+        quoteMint: r.quoteMint,
+        quoteAmount: r.quoteAmount.toString(),
+      }));
+      benchmark = computeSolBenchmark(solTrades, solByDate, {
+        windowStart,
+        tzOffsetMinutes,
+      });
     }
 
     const extras = { peaks, survival, benchmark };

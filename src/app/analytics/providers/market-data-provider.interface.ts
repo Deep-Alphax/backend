@@ -125,4 +125,10 @@ export interface MarketDataProvider {
     chain: Chain,
     mints: string[],
   ): Promise<Map<string, TokenSnapshot | null>>;
+
+  /**
+   * Valor USD ATUAL da carteira (holdings on-chain × preço). Opcional — nem todo
+   * provider suporta. Solana: SOL + SPL tokens; EVM: net-worth. `null` = indisponível.
+   */
+  fetchWalletBalanceUsd?(chain: Chain, address: string): Promise<string | null>;
 }

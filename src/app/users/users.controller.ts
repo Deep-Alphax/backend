@@ -1,7 +1,24 @@
-import { Controller, Get, Param, Res, NotFoundException } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Res,
+  NotFoundException,
+  UseGuards,
+} from '@nestjs/common';
 import { Response } from 'express';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { UsersService } from './users.service';
+import { SetRoleDto } from './dto/set-role.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminGuard } from '../auth/guards/admin.guard';
 
 /**
  * Endpoints de usuário. Por ora só serve o avatar re-hospedado (público — a foto
@@ -14,7 +31,9 @@ export class UsersController {
   constructor(private readonly users: UsersService) {}
 
   @Get(':id/avatar')
-  @ApiOperation({ summary: 'Avatar re-hospedado do usuário (imagem webp). Público.' })
+  @ApiOperation({
+    summary: 'Avatar re-hospedado do usuário (imagem webp). Público.',
+  })
   @ApiResponse({ status: 200, description: 'Imagem do avatar' })
   @ApiResponse({ status: 404, description: 'Usuário sem avatar armazenado' })
   async avatar(@Param('id') id: string, @Res() res: Response): Promise<void> {
@@ -25,5 +44,18 @@ export class UsersController {
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.setHeader('Content-Length', String(avatar.data.length));
     res.end(avatar.data);
+  }
+
+  @Post('set-role')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Define a role de um usuário pelo email (ADMIN)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Usuário atualizado (id, email, role)',
+  })
+  @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
+  setRole(@Body() dto: SetRoleDto) {
+    return this.users.setRoleByEmail(dto.email, dto.role);
   }
 }

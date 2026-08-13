@@ -8,16 +8,21 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
+import type { CapturedMessage } from '@prisma/client';
+import { PrismaService } from '../../prisma/prisma.service';
 import { isTrustedOrigin } from '../../common/config/allowed-origins';
 import {
   WALLET_SYNC_STATE_EVENT,
   WalletSyncStateEvent,
 } from '../analytics/ingestion/wallet-sync.service';
+import { FEED_CAPTURED_EVENT } from '../feed/feed.service';
 
 /** Superfícies de sessão válidas (cada uma tem seu cookie `pt_at_<surface>`). */
 const ALLOWED_SURFACES = new Set(['client', 'admin', 'organizer']);
 
 const userRoom = (userId: string): string => `user:${userId}`;
+/** Sala dos admins — recebe o feed do Discord em tempo real. */
+const FEED_ADMINS_ROOM = 'feed:admins';
 
 /**
  * Extrai o token de acesso do cookie do handshake. A superfície vem do header
@@ -59,7 +64,10 @@ function tokenFromHandshake(client: Socket): string | null {
     origin: (
       origin: string | undefined,
       cb: (err: Error | null, allow?: boolean) => void,
-    ) => (!origin || isTrustedOrigin(origin) ? cb(null, true) : cb(new Error('Not allowed by CORS'))),
+    ) =>
+      !origin || isTrustedOrigin(origin)
+        ? cb(null, true)
+        : cb(new Error('Not allowed by CORS')),
     credentials: true,
   },
 })
@@ -71,6 +79,7 @@ export class EventsGateway implements OnGatewayConnection {
   constructor(
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
   ) {}
 
   async handleConnection(client: Socket): Promise<void> {
@@ -78,14 +87,24 @@ export class EventsGateway implements OnGatewayConnection {
       const token = tokenFromHandshake(client);
       if (!token) return void client.disconnect();
 
-      const payload = await this.jwt.verifyAsync<{ sub?: string; mfaPending?: boolean }>(
-        token,
-        { secret: this.config.get<string>('JWT_SECRET'), algorithms: ['HS256'] },
-      );
+      const payload = await this.jwt.verifyAsync<{
+        sub?: string;
+        mfaPending?: boolean;
+      }>(token, {
+        secret: this.config.get<string>('JWT_SECRET'),
+        algorithms: ['HS256'],
+      });
       // Token de challenge MFA não abre canal — mesma regra da JwtStrategy.
       if (!payload?.sub || payload.mfaPending) return void client.disconnect();
 
       await client.join(userRoom(payload.sub));
+
+      // Admin também entra na sala do feed (recebe as capturas em tempo real).
+      const user = await this.prisma.getReadClient().user.findUnique({
+        where: { id: payload.sub },
+        select: { role: true },
+      });
+      if (user?.role === 'ADMIN') await client.join(FEED_ADMINS_ROOM);
     } catch {
       // Assinatura/exp inválida → sem canal (silencioso; é ruído esperado).
       client.disconnect();
@@ -100,5 +119,11 @@ export class EventsGateway implements OnGatewayConnection {
       status: payload.status,
       inserted: payload.inserted,
     });
+  }
+
+  /** Nova captura do Discord → empurra em tempo real para os admins conectados. */
+  @OnEvent(FEED_CAPTURED_EVENT)
+  handleFeedCaptured(message: CapturedMessage): void {
+    this.server.to(FEED_ADMINS_ROOM).emit('feed:new', message);
   }
 }

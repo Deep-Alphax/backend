@@ -64,6 +64,21 @@ export class SourcesController {
     );
   }
 
+  // ── Fontes por DISCORD (cruza trades × calls dos grupos) — a tab "Fontes" ──
+  @Get('analytics/discord-sources')
+  @ApiOperation({
+    summary:
+      'De onde vieram os trades: atribuição por servidor do Discord (via calls/CA)',
+  })
+  @ApiQuery({ name: 'period', enum: MetricPeriod, required: false })
+  @ApiResponse({ status: 200, description: 'Fontes (servidores) com métricas' })
+  discordAnalytics(@Request() req, @Query() q: SourcesQueryDto) {
+    return this.sources.getDiscordSourcesAnalytics(
+      req.user.id,
+      q.period ?? MetricPeriod.D30,
+    );
+  }
+
   // ── CRUD de fontes ──
   @Post('sources')
   @ApiOperation({ summary: 'Cadastra uma fonte de alpha' })

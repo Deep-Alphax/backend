@@ -13,6 +13,7 @@ import { WalletsModule } from './app/wallets/wallets.module';
 import { AnalyticsModule } from './app/analytics/analytics.module';
 import { SourcesModule } from './app/sources/sources.module';
 import { EventsModule } from './app/events/events.module';
+import { FeedModule } from './app/feed/feed.module';
 import { getCacheConfig } from './config/cache.config';
 import { IpThrottlerGuard } from './common/guards/ip-throttler.guard';
 import { RequestOriginGuard } from './common/guards/request-origin.guard';
@@ -41,6 +42,7 @@ import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-li
     AnalyticsModule,
     SourcesModule,
     EventsModule,
+    FeedModule,
   ],
   providers: [
     ConcurrencyLimiterMiddleware,

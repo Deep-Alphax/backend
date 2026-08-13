@@ -350,3 +350,105 @@ model TokenCandle {
   @@unique([chain, mint, timeframe, openTime])
   @@index([chain, mint, timeframe, openTime])
 }
+
+// ─────────────────────────── Discord Feed (bot) ───────────────────────────
+
+// Regra de monitoramento de um canal do Discord. Gerenciada pelo admin (CRUD).
+// Ao dar match do `pattern` numa mensagem do canal `channelId`, a captura é
+// persistida (CapturedMessage) e empurrada para o Telegram (`telegramChatId`).
+model DiscordMonitor {
+  id   String  @id @default(cuid())
+  name String? // rótulo opcional para o admin identificar a regra
+
+  // Alvo: um CANAL específico (channelId) OU um SERVIDOR inteiro (guildId, sem
+  // channelId → observa todos os canais do servidor). Ao menos um dos dois.
+  channelId String? // ID do canal do Discord
+  guildId   String? // ID do servidor (guild) — observa o servidor todo se sem channelId
+  // Padrão de match: regex "/corpo/flags" OU substring literal (case-insensitive).
+  // VAZIO/null = espelha TODAS as mensagens (inclusive de bots).
+  pattern        String?
+  telegramChatId String // destino do push no Telegram (ex.: -100...)
+
+  // Espera ~1.5s e captura a RESPOSTA do bot (Rick etc.) com dados ricos, em vez
+  // da mensagem crua do usuário. Desligável por regra.
+  waitForBotReply Boolean @default(true)
+  isActive        Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  captures CapturedMessage[]
+
+  @@index([channelId])
+  @@index([guildId])
+  @@index([isActive])
+}
+
+// Mensagem capturada de um canal monitorado (feed cru). Global (não é por usuário)
+// — o acesso é gated por JWT. `embed`/`links` preservam o conteúdo rico para o site.
+model CapturedMessage {
+  id String @id @default(cuid())
+
+  monitorId String?
+  monitor   DiscordMonitor? @relation(fields: [monitorId], references: [id], onDelete: SetNull)
+
+  guildName        String?
+  channelId        String
+  channelName      String?
+  authorTag        String?
+  matchedPattern   String?
+  discordMessageId String?
+
+  text  String  @db.Text // texto extraído (content + embeds)
+  embed Json? // embeds crus (para render rico no site)
+  links String[] // URLs extraídas
+
+  sentToTelegram Boolean @default(false)
+  telegramError  String?
+
+  createdAt DateTime @default(now())
+
+  calls MessageCall[]
+
+  @@index([channelId])
+  @@index([monitorId])
+  @@index([createdAt])
+}
+
+// "Call" derivada de uma mensagem capturada: um token (CA/mint) e/ou ticker citado
+// num grupo, num instante. Tabela derivada (recomputável) e INDEXADA para o
+// cruzamento eficiente trade × call (atribuição de fonte por Discord). Uma mensagem
+// pode gerar várias calls (vários CAs/tickers). `guildName` = o servidor (a "fonte").
+model MessageCall {
+  id                String          @id @default(cuid())
+  capturedMessageId String
+  capturedMessage   CapturedMessage @relation(fields: [capturedMessageId], references: [id], onDelete: Cascade)
+
+  chainType ChainType? // EVM | SOLANA (inferido do CA/link); null quando só ticker
+  mint      String? // CA/mint normalizado (lowercase no EVM); null quando só ticker
+  ticker    String? // símbolo em MAIÚSCULO sem '$'; null quando só CA
+
+  guildName String? // servidor de origem (a fonte)
+  channelId String
+  calledAt  DateTime // = createdAt da mensagem (instante da call)
+
+  @@index([mint, calledAt])
+  @@index([ticker, calledAt])
+  @@index([capturedMessageId])
+}
+
+// Usuário do Discord em BLACKLIST: mensagens dele NÃO são encaminhadas ao Telegram
+// (global, vale para todas as regras). Casa por `discordUserId` (snowflake, exato)
+// e/ou `username` (substring case-insensitive no username/tag). Ao menos um setado.
+model BlacklistedUser {
+  id            String  @id @default(cuid())
+  discordUserId String? // ID do usuário no Discord (snowflake) — match exato
+  username      String? // username/tag (ou parte) — match case-insensitive
+  reason        String?
+  isActive      Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+}

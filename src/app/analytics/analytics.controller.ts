@@ -7,7 +7,13 @@ import {
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+  ApiQuery,
+} from '@nestjs/swagger';
 import { MetricPeriod } from '@prisma/client';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -54,13 +60,28 @@ export class AnalyticsController {
   // Sem cache HTTP (mesma razão do portfolio): precisa refletir sync na hora.
   @NoCache()
   @Get('wallets/:id/analytics')
-  @ApiOperation({ summary: 'Métricas de trading de uma carteira (PnL, hold, buckets, etc.)' })
+  @ApiOperation({
+    summary: 'Métricas de trading de uma carteira (PnL, hold, buckets, etc.)',
+  })
   @ApiQuery({ name: 'period', enum: MetricPeriod, required: false })
-  @ApiQuery({ name: 'tz', required: false, description: 'Offset do fuso em minutos (ex.: -180 = BRT)' })
+  @ApiQuery({
+    name: 'tz',
+    required: false,
+    description: 'Offset do fuso em minutos (ex.: -180 = BRT)',
+  })
   @ApiResponse({ status: 200, description: 'Resultado das métricas' })
   @ApiResponse({ status: 404, description: 'Carteira não encontrada' })
-  walletAnalytics(@Request() req, @Param('id') id: string, @Query() q: MetricsQueryDto) {
-    return this.analytics.walletMetrics(req.user.id, id, q.period ?? MetricPeriod.D30, q.tz ?? 0);
+  walletAnalytics(
+    @Request() req,
+    @Param('id') id: string,
+    @Query() q: MetricsQueryDto,
+  ) {
+    return this.analytics.walletMetrics(
+      req.user.id,
+      id,
+      q.period ?? MetricPeriod.D30,
+      q.tz ?? 0,
+    );
   }
 
   // Sem cache HTTP: logo após sincronizar uma carteira, o dashboard REFAZ esta
@@ -69,12 +90,29 @@ export class AnalyticsController {
   // em DB (com tradesHash) já é o cache real — recomputa só quando os trades mudam.
   @NoCache()
   @Get('analytics/portfolio')
-  @ApiOperation({ summary: 'Métricas do perfil: agregado do portfólio, ou de uma carteira (walletId)' })
+  @ApiOperation({
+    summary:
+      'Métricas do perfil: agregado do portfólio, ou de uma carteira (walletId)',
+  })
   @ApiQuery({ name: 'period', enum: MetricPeriod, required: false })
-  @ApiQuery({ name: 'tz', required: false, description: 'Offset do fuso em minutos (ex.: -180 = BRT)' })
-  @ApiQuery({ name: 'walletId', required: false, description: 'Escopa a uma carteira (ausente = agregado)' })
-  @ApiResponse({ status: 200, description: 'Resultado do portfólio ou da carteira' })
-  @ApiResponse({ status: 404, description: 'Carteira não encontrada (walletId inválido)' })
+  @ApiQuery({
+    name: 'tz',
+    required: false,
+    description: 'Offset do fuso em minutos (ex.: -180 = BRT)',
+  })
+  @ApiQuery({
+    name: 'walletId',
+    required: false,
+    description: 'Escopa a uma carteira (ausente = agregado)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Resultado do portfólio ou da carteira',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Carteira não encontrada (walletId inválido)',
+  })
   portfolioAnalytics(@Request() req, @Query() q: MetricsQueryDto) {
     return this.analytics.portfolioMetrics(
       req.user.id,
@@ -82,5 +120,20 @@ export class AnalyticsController {
       q.tz ?? 0,
       q.walletId,
     );
+  }
+
+  @Get('analytics/wallet-balance')
+  @ApiOperation({
+    summary:
+      'Saldo ATUAL em USD (holdings on-chain) da carteira ou do portfólio',
+  })
+  @ApiQuery({
+    name: 'walletId',
+    required: false,
+    description: 'Escopa a uma carteira',
+  })
+  @ApiResponse({ status: 200, description: '{ balanceUsd: string | null }' })
+  walletBalance(@Request() req, @Query() q: MetricsQueryDto) {
+    return this.analytics.getWalletBalanceUsd(req.user.id, q.walletId);
   }
 }

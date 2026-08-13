@@ -5,7 +5,12 @@ describe('processAvatar', () => {
   it('recorta para um quadrado AVATAR_SIZE e recodifica em webp', async () => {
     // Fonte sintética retangular (200×300) → `cover` deve produzir um quadrado.
     const source = await sharp({
-      create: { width: 200, height: 300, channels: 3, background: { r: 10, g: 200, b: 50 } },
+      create: {
+        width: 200,
+        height: 300,
+        channels: 3,
+        background: { r: 10, g: 200, b: 50 },
+      },
     })
       .png()
       .toBuffer();
@@ -21,7 +26,12 @@ describe('processAvatar', () => {
 
   it('produz saída não-vazia e menor/normalizada', async () => {
     const source = await sharp({
-      create: { width: 512, height: 512, channels: 3, background: { r: 0, g: 0, b: 255 } },
+      create: {
+        width: 512,
+        height: 512,
+        channels: 3,
+        background: { r: 0, g: 0, b: 255 },
+      },
     })
       .png()
       .toBuffer();
@@ -31,6 +41,8 @@ describe('processAvatar', () => {
   });
 
   it('lança quando a entrada não é uma imagem válida', async () => {
-    await expect(processAvatar(Buffer.from('isto não é uma imagem'))).rejects.toThrow();
+    await expect(
+      processAvatar(Buffer.from('isto não é uma imagem')),
+    ).rejects.toThrow();
   });
 });

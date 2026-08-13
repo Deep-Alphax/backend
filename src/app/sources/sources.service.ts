@@ -17,6 +17,7 @@ import {
   AddSourceWalletDto,
 } from './dto/source.dto';
 import { attributeBuys, UserBuy, LeadBuy } from './source-attribution';
+import { normMint } from '../feed/ca-extract';
 import {
   computeSourceBreakdown,
   SourceBreakdown,
@@ -389,6 +390,156 @@ export class SourcesService {
       attributionByBuyTradeId,
     ).catch((err) => {
       this.logger.warn(`Capture (candles) por fonte falhou: ${err?.message}`);
+      return undefined;
+    });
+
+    return computeSourceBreakdown(
+      userTrades,
+      attributionByBuyTradeId,
+      sources,
+      { windowStart },
+      candlesByMint,
+    );
+  }
+
+  /**
+   * Fontes por DISCORD: cruza os trades OWN do usuário com as "calls" dos grupos
+   * (MessageCall). Cada COMPRA é atribuída ao servidor que chamou a moeda PRIMEIRO
+   * (mais antigo), por CA (exato) e, na ausência, por ticker — desde que a call seja
+   * ANTES do trade. Sem call anterior → "Triagem própria". Reusa todo o motor de
+   * métricas/recomendação (`computeSourceBreakdown`).
+   */
+  async getDiscordSourcesAnalytics(
+    userId: string,
+    period: MetricPeriod,
+  ): Promise<SourceBreakdown[]> {
+    const read = this.prisma.getReadClient();
+
+    const rows = await read.trade.findMany({
+      where: { wallet: { userId, kind: WalletKind.OWN } },
+      select: {
+        id: true,
+        baseMint: true,
+        baseSymbol: true,
+        side: true,
+        blockTime: true,
+        baseAmount: true,
+        priceUsd: true,
+        chainType: true,
+        wallet: { select: { chain: true } },
+      },
+      orderBy: { blockTime: 'asc' },
+    });
+    if (rows.length === 0) return [];
+
+    const buyRows = rows.filter((r) => r.side === 'BUY');
+    const mintList = [
+      ...new Set(buyRows.map((r) => normMint(r.chainType, r.baseMint))),
+    ];
+    const tickerList = [
+      ...new Set(
+        buyRows
+          .map((r) => r.baseSymbol?.toUpperCase())
+          .filter((v): v is string => !!v),
+      ),
+    ];
+
+    // Calls para esses mints/tickers, ordenadas asc → 1ª vista por chave = a mais antiga.
+    const calls =
+      mintList.length || tickerList.length
+        ? await read.messageCall.findMany({
+            where: {
+              OR: [{ mint: { in: mintList } }, { ticker: { in: tickerList } }],
+            },
+            select: {
+              chainType: true,
+              mint: true,
+              ticker: true,
+              guildName: true,
+              calledAt: true,
+            },
+            orderBy: { calledAt: 'asc' },
+          })
+        : [];
+
+    const earliestByMint = new Map<
+      string,
+      { guildName: string | null; at: number }
+    >();
+    const earliestByTicker = new Map<
+      string,
+      { guildName: string | null; at: number }
+    >();
+    for (const c of calls) {
+      if (c.mint && c.chainType) {
+        const key = `${c.chainType}|${c.mint}`;
+        if (!earliestByMint.has(key)) {
+          earliestByMint.set(key, {
+            guildName: c.guildName,
+            at: c.calledAt.getTime(),
+          });
+        }
+      }
+      if (c.ticker && !earliestByTicker.has(c.ticker)) {
+        earliestByTicker.set(c.ticker, {
+          guildName: c.guildName,
+          at: c.calledAt.getTime(),
+        });
+      }
+    }
+
+    const SELF_ID = '__self__';
+    const attributionByBuyTradeId = new Map<string, string[]>();
+    const sourceNameById = new Map<string, string>();
+    const serverKey = (g: string | null) =>
+      `g:${(g ?? 'Servidor').toLowerCase()}`;
+
+    for (const r of buyRows) {
+      const buyTime = r.blockTime.getTime();
+      let hit: { guildName: string | null; at: number } | undefined;
+
+      const byMint = earliestByMint.get(
+        `${r.chainType}|${normMint(r.chainType, r.baseMint)}`,
+      );
+      if (byMint && byMint.at < buyTime) hit = byMint;
+      if (!hit && r.baseSymbol) {
+        const byTicker = earliestByTicker.get(r.baseSymbol.toUpperCase());
+        if (byTicker && byTicker.at < buyTime) hit = byTicker;
+      }
+
+      if (hit) {
+        const id = serverKey(hit.guildName);
+        sourceNameById.set(id, hit.guildName ?? 'Servidor');
+        attributionByBuyTradeId.set(r.id, [id]);
+      } else {
+        sourceNameById.set(SELF_ID, 'Triagem própria');
+        attributionByBuyTradeId.set(r.id, [SELF_ID]);
+      }
+    }
+
+    const sources = [...sourceNameById.entries()].map(([id, name]) => ({
+      id,
+      name,
+    }));
+
+    const userTrades: SourceTradeInput[] = rows.map((r) => ({
+      id: r.id,
+      mint: r.baseMint,
+      symbol: r.baseSymbol,
+      side: r.side,
+      blockTimeMs: r.blockTime.getTime(),
+      baseAmount: r.baseAmount.toString(),
+      priceUsd: r.priceUsd.toString(),
+    }));
+
+    const windowStart = this.windowStart(period);
+    const candlesByMint = await this.loadCaptureCandles(
+      rows,
+      attributionByBuyTradeId,
+    ).catch((err) => {
+      this.logger.warn(
+        `Capture (candles) por fonte Discord falhou: ${err?.message}`,
+      );
       return undefined;
     });
 

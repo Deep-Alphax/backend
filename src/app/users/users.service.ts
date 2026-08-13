@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
+import { Role } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../../prisma/prisma.service';
 import { processAvatar, MAX_SOURCE_BYTES } from './avatar.util';
@@ -22,8 +23,30 @@ export class UsersService {
     private readonly config: ConfigService,
   ) {}
 
+  /**
+   * Define a role de um usuário pelo EMAIL (admin) — promove/rebaixa sem mexer no
+   * banco à mão. Busca case-insensitive. Retorna a projeção pública.
+   */
+  async setRoleByEmail(
+    email: string,
+    role: Role,
+  ): Promise<{ id: string; email: string; role: Role }> {
+    const user = await this.prisma.getReadClient().user.findFirst({
+      where: { email: { equals: email.trim(), mode: 'insensitive' } },
+      select: { id: true },
+    });
+    if (!user) throw new NotFoundException('Usuário não encontrado');
+    return this.prisma.getWriteClient().user.update({
+      where: { id: user.id },
+      data: { role },
+      select: { id: true, email: true, role: true },
+    });
+  }
+
   private apiBaseUrl(): string {
-    return (this.config.get<string>('API_PUBLIC_URL') || 'http://localhost:3333').replace(/\/$/, '');
+    return (
+      this.config.get<string>('API_PUBLIC_URL') || 'http://localhost:3333'
+    ).replace(/\/$/, '');
   }
 
   /** URL absoluta do nosso endpoint de avatar para um usuário. */
@@ -37,14 +60,20 @@ export class UsersService {
    * (evita re-download a cada login). Nunca lança: falha → fallback para a URL do
    * Google (melhor que nada). Devolve o usuário (possivelmente) atualizado.
    */
-  async hydrateGoogleAvatar<T extends AvatarUser>(user: T, pictureUrl?: string | null): Promise<T> {
+  async hydrateGoogleAvatar<T extends AvatarUser>(
+    user: T,
+    pictureUrl?: string | null,
+  ): Promise<T> {
     const write = this.prisma.getWriteClient();
     const endpoint = this.avatarEndpoint(user.id);
 
     // Já hospedado por nós → só garante que avatarUrl aponta para o endpoint.
     if (user.avatarData) {
       if (user.avatarUrl === endpoint) return user;
-      return write.user.update({ where: { id: user.id }, data: { avatarUrl: endpoint } }) as unknown as T;
+      return write.user.update({
+        where: { id: user.id },
+        data: { avatarUrl: endpoint },
+      }) as unknown as T;
     }
 
     if (!pictureUrl) return user;
@@ -63,7 +92,11 @@ export class UsersService {
         where: { id: user.id },
         // new Uint8Array(...): Prisma Bytes espera Uint8Array<ArrayBuffer> (o Buffer
         // do sharp é Uint8Array<ArrayBufferLike> e não casa no tipo).
-        data: { avatarData: new Uint8Array(data), avatarMime: mime, avatarUrl: endpoint },
+        data: {
+          avatarData: new Uint8Array(data),
+          avatarMime: mime,
+          avatarUrl: endpoint,
+        },
       }) as unknown as T;
     } catch (err: any) {
       this.logger.warn(
@@ -71,17 +104,25 @@ export class UsersService {
       );
       // Fallback: mantém a URL do Google para ao menos exibir algo.
       if (user.avatarUrl === pictureUrl) return user;
-      return write.user.update({ where: { id: user.id }, data: { avatarUrl: pictureUrl } }) as unknown as T;
+      return write.user.update({
+        where: { id: user.id },
+        data: { avatarUrl: pictureUrl },
+      }) as unknown as T;
     }
   }
 
   /** Bytes do avatar re-hospedado para servir. null quando não há imagem armazenada. */
-  async getAvatar(userId: string): Promise<{ data: Buffer; mime: string } | null> {
+  async getAvatar(
+    userId: string,
+  ): Promise<{ data: Buffer; mime: string } | null> {
     const u = await this.prisma.getReadClient().user.findFirst({
       where: { id: userId, deletedAt: null },
       select: { avatarData: true, avatarMime: true },
     });
     if (!u?.avatarData) return null;
-    return { data: Buffer.from(u.avatarData), mime: u.avatarMime || 'image/webp' };
+    return {
+      data: Buffer.from(u.avatarData),
+      mime: u.avatarMime || 'image/webp',
+    };
   }
 }
