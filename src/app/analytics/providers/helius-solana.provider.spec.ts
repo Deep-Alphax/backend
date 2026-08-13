@@ -139,6 +139,37 @@ describe('HeliusSolanaProvider', () => {
     expect(res.nextCursor).toBe('sig99');
   });
 
+  it('SOL: usa o DELTA NATIVO real (desconta taxa/tip) e não a perna WSOL bruta', async () => {
+    // Venda estilo Axiom: perna WSOL bruta 10; nativo recebe 10 e paga 0,1 de fee →
+    // delta nativo 9,9. quoteAmount deve ser 9,9 (líquido), não 10.
+    const axiomSell = {
+      signature: 'sigAxiom',
+      timestamp: secs('2026-08-11T03:00:00Z'),
+      feePayer: A,
+      fee: 0,
+      source: 'FLASHX',
+      tokenTransfers: [
+        {
+          fromUserAccount: A,
+          toUserAccount: 'P',
+          mint: MANLET,
+          tokenAmount: 1000,
+        },
+        { fromUserAccount: 'P', toUserAccount: A, mint: WSOL, tokenAmount: 10 },
+      ],
+      nativeTransfers: [
+        { fromUserAccount: 'P', toUserAccount: A, amount: 10e9 }, // unwrap p/ nativo
+        { fromUserAccount: A, toUserAccount: 'FEE', amount: 0.1e9 }, // taxa 1% em SOL
+      ],
+    };
+    const { provider } = makeProvider([axiomSell]);
+    const res = await provider.fetchSwaps({ chain: Chain.SOLANA, address: A });
+    const s = res.swaps[0];
+    expect(s.side).toBe(TradeSide.SELL);
+    expect(s.quoteMint).toBe(WSOL);
+    expect(Number(s.quoteAmount)).toBeCloseTo(9.9, 9); // 10 − 0,1 de taxa
+  });
+
   it('fetchTokenSnapshots via DexScreener: par de maior liquidez; mint sem par → null', async () => {
     // MANLET tem 2 pares (fica com o de maior liquidez); DEAD não tem par → null.
     const DEAD = 'DEADmint111111111111111111111111111111111111';

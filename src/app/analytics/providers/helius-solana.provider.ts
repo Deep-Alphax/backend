@@ -154,35 +154,57 @@ export class HeliusSolanaProvider {
     }
     if (!baseMint || baseAbs < 1e-12) return null;
 
-    // quote: WSOL/stable presente nos tokenTransfers; senão, SOL nativo líquido.
+    const baseFee = t?.feePayer === address ? (Number(t?.fee) || 0) / 1e9 : 0;
+
+    // Delta de SOL NATIVO da carteira nesta tx: é a mudança REAL de saldo — já líquida
+    // de taxa da plataforma (ex.: 1% da Axiom), tips do Jito e rent, todos pagos como
+    // transferências de SOL à parte. A perna WSOL bruta NÃO reflete esses custos e
+    // superestima o resultado. Menos a base fee (deduzida fora dos transfers).
+    let solNative = 0;
+    let hasNative = false;
+    for (const n of t?.nativeTransfers ?? []) {
+      const a = (Number(n?.amount) || 0) / 1e9;
+      if (n.fromUserAccount === address) {
+        solNative -= a;
+        hasNative = true;
+      }
+      if (n.toUserAccount === address) {
+        solNative += a;
+        hasNative = true;
+      }
+    }
+
+    // quote: stablecoin tem valor USD direto; senão a contraparte é SOL.
     let quoteMint: string | null = null;
     for (const m of net.keys()) {
-      if (
-        m === HeliusSolanaProvider.WSOL ||
-        HeliusSolanaProvider.STABLES.has(m)
-      ) {
+      if (HeliusSolanaProvider.STABLES.has(m)) {
         quoteMint = m;
         break;
       }
     }
-    let quoteAmount = quoteMint ? Math.abs(net.get(quoteMint) ?? 0) : 0;
-    if (!quoteMint) {
-      let sol = 0;
-      for (const n of t?.nativeTransfers ?? []) {
-        const a = (Number(n?.amount) || 0) / 1e9;
-        if (n.fromUserAccount === address) sol -= a;
-        if (n.toUserAccount === address) sol += a;
-      }
-      if (Math.abs(sol) > 1e-9) {
-        quoteMint = HeliusSolanaProvider.WSOL;
-        quoteAmount = Math.abs(sol);
+
+    let quoteAmount: number;
+    if (quoteMint) {
+      quoteAmount = Math.abs(net.get(quoteMint) ?? 0);
+    } else {
+      // SOL: preferimos o delta nativo REAL. A perna WSOL (bruta) é usada quando o
+      // movimento nativo é pequeno perto dela (rent incidental) ou inexistente. Sem
+      // perna WSOL nem movimento nativo real → não há contraparte SOL (não é swap).
+      const wsolLeg = Math.abs(net.get(HeliusSolanaProvider.WSOL) ?? 0);
+      quoteMint = HeliusSolanaProvider.WSOL;
+      if (wsolLeg >= 1e-12 && Math.abs(solNative) < 0.5 * wsolLeg) {
+        quoteAmount = wsolLeg; // nativo incidental → perna WSOL
+      } else if (hasNative && Math.abs(solNative) > 1e-9) {
+        quoteAmount = Math.abs(solNative - baseFee); // swap liquidado em SOL nativo
+      } else {
+        quoteAmount = wsolLeg; // 0 quando não há perna SOL → filtrado abaixo
       }
     }
-    if (!quoteMint || quoteAmount < 1e-12) return null;
+    if (quoteAmount < 1e-12) return null;
 
     const baseDelta = net.get(baseMint) ?? 0;
     const side = baseDelta > 0 ? TradeSide.BUY : TradeSide.SELL;
-    const feeNative = t?.feePayer === address ? (Number(t?.fee) || 0) / 1e9 : 0;
+    const feeNative = baseFee;
 
     return {
       txHash: String(t?.signature ?? ''),
