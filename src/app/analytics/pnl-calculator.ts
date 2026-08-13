@@ -166,8 +166,8 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
   let totalTrades = 0;
   let buys = 0;
   let sells = 0;
-  let realizedTotal = ZERO; // bruto = trading + windfall (reconcilia com sum(daily))
-  let tradingTotal = ZERO; // PnL de trading (vendas casadas)
+  let realizedTotal = ZERO; // PnL de trading realizado (vendas casadas) — exclui windfall
+  let tradingTotal = ZERO; // PnL de trading (vendas casadas) — idêntico a realizedTotal
   let windfallTotal = ZERO; // proceeds sem base de custo
   let feesTotal = ZERO;
   let volumeTotal = ZERO;
@@ -219,8 +219,11 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
       }
     } else {
       const m = matchSell(st, qty, price, t.blockTime.getTime());
-      // realizedThis (bruto) alimenta buckets/dia/after-loss → sum(daily) reconcilia com realizedTotal.
-      realizedThis = m.matchedRealized.plus(m.zeroBasisProceeds);
+      // A evolução do capital deve refletir SÓ trades reais (compra→venda casada). Por isso
+      // realizedThis = só a parte CASADA; o windfall (proceeds de tokens que entraram na
+      // carteira sem compra — transferência/airdrop/mint) é reportado à parte em
+      // windfallProceedsUsd e NÃO entra em buckets/dia/curva/Resultado/bankroll.
+      realizedThis = m.matchedRealized;
       if (within) {
         st.trades += 1;
         st.sellUsd = st.sellUsd.plus(usd);

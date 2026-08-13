@@ -59,9 +59,9 @@ describe('computePnl', () => {
 
   it('venda sem lote vira WINDFALL (não PnL de trading) e conta como unmatched', () => {
     const r = computePnl([sell(5, 2, 0)], ALL);
-    expect(r.realizedPnlUsd).toBe('10.00'); // bruto (5 * 2, custo 0)
+    expect(r.realizedPnlUsd).toBe('0.00'); // só trading casado; windfall não entra no Resultado
     expect(r.tradingPnlUsd).toBe('0.00'); // nada casado → 0 de trading
-    expect(r.windfallProceedsUsd).toBe('10.00'); // proceeds "de graça"
+    expect(r.windfallProceedsUsd).toBe('10.00'); // proceeds "de graça" (reportado à parte)
     expect(r.confidence.unmatchedSellCount).toBe(1);
     expect(r.avgHoldSecondsWinners).toBeNull();
   });
@@ -71,9 +71,32 @@ describe('computePnl', () => {
     const r = computePnl([buy(10, 1, 0), sell(15, 3, 1)], ALL);
     expect(r.tradingPnlUsd).toBe('20.00');
     expect(r.windfallProceedsUsd).toBe('15.00');
-    expect(r.realizedPnlUsd).toBe('35.00'); // bruto reconcilia
+    expect(r.realizedPnlUsd).toBe('20.00'); // Resultado = só trading (exclui o windfall de 15)
     expect(r.netPnlUsd).toBe('20.00'); // líquido de trading (sem fees)
     expect(r.confidence.unmatchedSellCount).toBe(1);
+  });
+
+  it('windfall (venda sem compra) NÃO entra na curva de capital nem no Resultado', () => {
+    // Regressão do bug "evolução do capital contava saque/transferência": um token que
+    // apareceu na carteira sem compra (transferência de outra carteira, airdrop, mint) e
+    // foi vendido gera WINDFALL — não é trade e não pode inflar a curva/Resultado.
+    const day2 = 24;
+    const r = computePnl(
+      [
+        buy(10, 1, 0, { mint: 'REAL', symbol: 'REAL' }),
+        sell(10, 3, 2, { mint: 'REAL', symbol: 'REAL' }), // dia 1: +20 de trading real
+        sell(5, 4, day2, { mint: 'GIFT', symbol: 'GIFT' }), // dia 2: 20 de windfall (custo 0)
+      ],
+      ALL,
+    );
+    // Resultado reflete só o trade real (+20); os 20 de windfall ficam à parte.
+    expect(r.realizedPnlUsd).toBe('20.00');
+    expect(r.tradingPnlUsd).toBe('20.00');
+    expect(r.windfallProceedsUsd).toBe('20.00');
+    // Acumulado: 20 no dia 1 e CONTINUA 20 no dia 2 (o windfall não soma).
+    expect(r.capital.points.map((p) => p.cumulativePnlUsd)).toEqual(['20.00', '20.00']);
+    expect(r.capital.daysInGreen).toBe(1); // dia do windfall não é "dia no verde"
+    expect(r.perDay.worstDay?.realizedPnlUsd).toBe('0.00'); // dia do windfall = 0, não +20
   });
 
   it('atribui PnL só na janela, mas usa compras anteriores para a base de custo', () => {
