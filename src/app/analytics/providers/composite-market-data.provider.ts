@@ -16,7 +16,8 @@ import {
  * Provider composto: escolhe a MELHOR fonte por capacidade/chain.
  *  - SWAPS Solana → Helius (cobre Axiom/Meteora/pump.fun, que a Moralis não indexa);
  *  - SWAPS EVM   → Moralis (Wallet API);
- *  - OHLC e preço/snapshot de token → Moralis (bom e barato p/ esse uso).
+ *  - SNAPSHOT (preço/liquidez) Solana → Helius (DexScreener, sem Moralis); EVM → Moralis;
+ *  - OHLC de token → Moralis.
  *
  * Fica atrás do token MARKET_DATA_PROVIDER — o resto do sistema (ingestão, PnL,
  * candles) não muda; só a origem dos swaps Solana passa a ser o Helius.
@@ -38,18 +39,23 @@ export class CompositeMarketDataProvider implements MarketDataProvider {
     return this.moralis.fetchOhlc(params);
   }
 
+  /** Snapshot de token: Solana → Helius (DexScreener, sem Moralis); EVM → Moralis. */
   fetchTokenSnapshot(
     chain: Chain,
     mint: string,
   ): Promise<TokenSnapshot | null> {
-    return this.moralis.fetchTokenSnapshot(chain, mint);
+    return chainTypeOf(chain) === ChainType.SOLANA
+      ? this.helius.fetchTokenSnapshot(chain, mint)
+      : this.moralis.fetchTokenSnapshot(chain, mint);
   }
 
   fetchTokenSnapshots(
     chain: Chain,
     mints: string[],
   ): Promise<Map<string, TokenSnapshot | null>> {
-    return this.moralis.fetchTokenSnapshots(chain, mints);
+    return chainTypeOf(chain) === ChainType.SOLANA
+      ? this.helius.fetchTokenSnapshots(chain, mints)
+      : this.moralis.fetchTokenSnapshots(chain, mints);
   }
 
   /**

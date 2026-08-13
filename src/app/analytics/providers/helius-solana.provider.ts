@@ -4,7 +4,6 @@ import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Chain, TradeSide } from '@prisma/client';
 import { CacheRedisService } from '../../../common/services/cache-redis.service';
-import { MoralisProvider } from './moralis.provider';
 import {
   FetchSwapsParams,
   FetchSwapsResult,
@@ -47,18 +46,27 @@ export class HeliusSolanaProvider {
   ]);
   /** TTL (s) do cache do mapa preço-do-SOL-por-dia (fechamento diário é imutável). */
   private static readonly SOLUSD_TTL = 24 * 60 * 60;
+  /** TTL (s) do snapshot de token resolvido (preço/liquidez muda devagar p/ survival). */
+  private static readonly SNAP_TTL_OK = 6 * 60 * 60;
+  /** TTL (s) do snapshot NÃO resolvido — curto, p/ auto-recuperar de falha transitória. */
+  private static readonly SNAP_TTL_MISS = 15 * 60;
+
+  private readonly coinGeckoBase: string;
+  private readonly coinGeckoKey: string;
 
   constructor(
     private readonly config: ConfigService,
     private readonly http: HttpService,
-    // Reuso da Moralis SÓ para preço histórico do SOL (OHLC diário do WSOL). Sem ciclo:
-    // a Moralis não depende do Helius.
-    private readonly moralis: MoralisProvider,
     @Optional() private readonly cache?: CacheRedisService,
   ) {
     this.apiKey = this.config.get<string>('HELIUS_API_KEY') ?? '';
     this.base =
       this.config.get<string>('HELIUS_BASE') ?? 'https://api.helius.xyz';
+    this.coinGeckoBase =
+      this.config.get<string>('COINGECKO_BASE') ??
+      'https://api.coingecko.com/api/v3';
+    // Opcional: key demo do CoinGecko (header x-cg-demo-api-key) sobe o rate limit.
+    this.coinGeckoKey = this.config.get<string>('COINGECKO_API_KEY') ?? '';
   }
 
   async fetchSwaps(params: FetchSwapsParams): Promise<FetchSwapsResult> {
@@ -272,12 +280,14 @@ export class HeliusSolanaProvider {
     }
   }
 
-  /** Preço USD por mint via DexScreener (lotes de 30). Usa o par de MAIOR liquidez. */
-  private async dexScreenerPrices(
+  /**
+   * Snapshot (preço + liquidez) por mint via DexScreener (lotes de 30, grátis/sem key).
+   * Escolhe o par de MAIOR liquidez de cada token. Mints sem par ficam ausentes do mapa.
+   */
+  private async dexScreenerSnapshots(
     mints: string[],
-  ): Promise<Map<string, number>> {
-    const out = new Map<string, number>();
-    const bestLiq = new Map<string, number>();
+  ): Promise<Map<string, { priceUsd: number; liquidityUsd: number }>> {
+    const out = new Map<string, { priceUsd: number; liquidityUsd: number }>();
     const uniq = [...new Set(mints)].slice(0, 300);
     for (let i = 0; i < uniq.length; i += 30) {
       const chunk = uniq.slice(i, i + 30);
@@ -294,16 +304,89 @@ export class HeliusSolanaProvider {
           const price = Number(p?.priceUsd);
           const liq = Number(p?.liquidity?.usd ?? 0);
           if (!mint || !Number.isFinite(price) || price <= 0) continue;
-          if (liq > (bestLiq.get(mint) ?? -1)) {
-            bestLiq.set(mint, liq);
-            out.set(mint, price);
+          // Fica com o par de maior liquidez (proxy de preço mais confiável).
+          if (liq > (out.get(mint)?.liquidityUsd ?? -1)) {
+            out.set(mint, { priceUsd: price, liquidityUsd: liq });
           }
         }
       } catch {
-        /* lote falhou → mints ficam sem preço (0) */
+        /* lote falhou → mints ficam sem snapshot */
       }
     }
     return out;
+  }
+
+  /** Só o preço (conveniência p/ o cálculo de saldo). */
+  private async dexScreenerPrices(
+    mints: string[],
+  ): Promise<Map<string, number>> {
+    const snaps = await this.dexScreenerSnapshots(mints);
+    const out = new Map<string, number>();
+    for (const [mint, s] of snaps) out.set(mint, s.priceUsd);
+    return out;
+  }
+
+  // ─────────────────── Snapshots de token (survival) — DexScreener + cache ───────────────────
+
+  fetchTokenSnapshot(
+    _chain: Chain,
+    mint: string,
+  ): Promise<TokenSnapshot | null> {
+    return this.fetchTokenSnapshots(_chain, [mint]).then(
+      (m) => m.get(mint) ?? null,
+    );
+  }
+
+  /**
+   * Snapshots em LOTE (preço/liquidez) via DexScreener, SEM Moralis. Mesma estratégia
+   * de custo do adapter Moralis: cache Redis por mint (hits não tocam a rede), misses
+   * num único fetch batch; resultado (inclusive `null`) é cacheado — 6h resolvido,
+   * 15min falha. Best-effort: qualquer erro deixa o mint como `null`.
+   */
+  async fetchTokenSnapshots(
+    _chain: Chain,
+    mints: string[],
+  ): Promise<Map<string, TokenSnapshot | null>> {
+    const out = new Map<string, TokenSnapshot | null>();
+    if (mints.length === 0) return out;
+    const uniq = [...new Set(mints)];
+
+    // Camada 1: cache por mint.
+    const misses: string[] = [];
+    for (const mint of uniq) {
+      const cached = this.cache
+        ? await this.cache.getJson<{ v: TokenSnapshot | null }>(
+            this.snapKey(mint),
+          )
+        : null;
+      if (cached) out.set(mint, cached.v);
+      else misses.push(mint);
+    }
+    if (misses.length === 0) return out;
+
+    // Camada 2: um batch DexScreener p/ os misses.
+    const snaps = await this.dexScreenerSnapshots(misses);
+
+    // Camada 3: registra e cacheia (inclusive null, TTL curto).
+    for (const mint of misses) {
+      const s = snaps.get(mint);
+      const snap: TokenSnapshot | null = s
+        ? { priceUsd: String(s.priceUsd), liquidityUsd: String(s.liquidityUsd) }
+        : null;
+      out.set(mint, snap);
+      await this.cache?.setJson(
+        this.snapKey(mint),
+        { v: snap },
+        snap
+          ? HeliusSolanaProvider.SNAP_TTL_OK
+          : HeliusSolanaProvider.SNAP_TTL_MISS,
+      );
+    }
+    return out;
+  }
+
+  private snapKey(mint: string): string {
+    return `helius:snap:v1:${mint}`;
   }
 
   // ─────────────────────────── Preço USD (perna SOL × preço do SOL no dia) ───────────────────────────
@@ -354,8 +437,8 @@ export class HeliusSolanaProvider {
   /**
    * Preço do SOL (USD) por dia (YYYY-MM-DD). Cache POR DIA no Redis: o fechamento
    * diário é imutável, então dias já vistos (por outras páginas/carteiras) NÃO
-   * refazem chamada. Só bate na Moralis (OHLC diário do WSOL) para os dias que
-   * faltam, num único intervalo contíguo — corta drasticamente o custo no backfill.
+   * refazem chamada. Só bate no CoinGecko (grátis, sem key) para os dias que faltam,
+   * num único intervalo contíguo — corta drasticamente o custo no backfill.
    */
   private async solUsdByDay(
     from: Date,
@@ -376,31 +459,62 @@ export class HeliusSolanaProvider {
     }
     if (missing.length === 0) return out;
 
-    // 2) busca na Moralis SÓ o intervalo faltante (uma vez) e cacheia cada dia.
-    const mFrom = new Date(`${missing[0]}T00:00:00Z`);
-    const mTo = new Date(`${missing[missing.length - 1]}T23:59:59Z`);
+    // 2) CoinGecko market_chart/range SÓ do intervalo faltante (uma vez); cacheia cada dia.
+    const fromSec = Math.floor(
+      new Date(`${missing[0]}T00:00:00Z`).getTime() / 1000,
+    );
+    const toSec = Math.floor(
+      new Date(`${missing[missing.length - 1]}T23:59:59Z`).getTime() / 1000,
+    );
+    const byDay = await this.coinGeckoSolDaily(fromSec, toSec);
+    for (const [day, price] of byDay) {
+      if (price > 0) {
+        out.set(day, price);
+        await this.cache?.setJson(
+          this.solDayKey(day),
+          price,
+          HeliusSolanaProvider.SOLUSD_TTL,
+        );
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Preço diário do SOL (USD) via CoinGecko `coins/solana/market_chart/range` (grátis,
+   * sem key; a granularidade varia com o range — bucketiza por dia UTC e fica com o
+   * ÚLTIMO preço de cada dia ≈ fechamento). Best-effort → mapa vazio em falha.
+   */
+  private async coinGeckoSolDaily(
+    fromSec: number,
+    toSec: number,
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
     try {
-      const candles = await this.moralis.fetchOhlc({
-        chain: Chain.SOLANA,
-        mint: HeliusSolanaProvider.WSOL,
-        from: mFrom,
-        to: mTo,
-        timeframe: '1d',
-      });
-      for (const c of candles) {
-        const day = c.openTime.toISOString().slice(0, 10);
-        const close = Number(c.close);
-        if (close > 0) {
-          out.set(day, close);
-          await this.cache?.setJson(
-            this.solDayKey(day),
-            close,
-            HeliusSolanaProvider.SOLUSD_TTL,
-          );
-        }
+      const headers: Record<string, string> = { accept: 'application/json' };
+      if (this.coinGeckoKey) headers['x-cg-demo-api-key'] = this.coinGeckoKey;
+      const resp = await firstValueFrom(
+        this.http.get(`${this.coinGeckoBase}/coins/solana/market_chart/range`, {
+          params: {
+            vs_currency: 'usd',
+            from: String(fromSec),
+            to: String(toSec),
+          },
+          headers,
+          timeout: 15000,
+        } as any),
+      );
+      const prices: [number, number][] = Array.isArray(resp.data?.prices)
+        ? resp.data.prices
+        : [];
+      // Último ponto de cada dia vence (prices vem em ordem cronológica).
+      for (const [ms, price] of prices) {
+        const day = new Date(ms).toISOString().slice(0, 10);
+        const p = Number(price);
+        if (p > 0) out.set(day, p);
       }
     } catch (err: any) {
-      this.logger.warn(`Preço SOL/dia (WSOL OHLC) falhou: ${err?.message}`);
+      this.logger.warn(`Preço SOL/dia (CoinGecko) falhou: ${err?.message}`);
     }
     return out;
   }
@@ -430,11 +544,8 @@ export class HeliusSolanaProvider {
 
   private async currentSolUsd(): Promise<number | null> {
     try {
-      const snap = await this.moralis.fetchTokenSnapshot(
-        Chain.SOLANA,
-        HeliusSolanaProvider.WSOL,
-      );
-      const p = snap?.priceUsd != null ? Number(snap.priceUsd) : NaN;
+      const prices = await this.dexScreenerPrices([HeliusSolanaProvider.WSOL]);
+      const p = prices.get(HeliusSolanaProvider.WSOL) ?? NaN;
       return Number.isFinite(p) && p > 0 ? p : null;
     } catch {
       return null;

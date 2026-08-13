@@ -45,6 +45,11 @@ const PERIOD_DAYS: Record<MetricPeriod, number> = {
 
 /** Mint do Wrapped SOL — série de preço p/ o benchmark "medido em SOL". */
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+/** Stablecoins Solana: única razão p/ precisar do preço do SOL no benchmark. */
+const SOL_STABLE_MINTS = new Set<string>([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+]);
 
 /** Teto de tokens consultados no Bloco 2 por request (contém custo/rate-limit). */
 const MAX_TOKENS_PER_REQUEST = 40;
@@ -408,29 +413,40 @@ export class AnalyticsService {
     });
     const survival = computeSurvival(statuses);
 
-    // Benchmark "capital medido em SOL": SOL realizado DE VERDADE (FIFO nas pernas
-    // SOL dos trades) — não a conversão do PnL-USD ao preço de um dia. solByDate só
-    // serve p/ converter pernas em stablecoin ao preço do SOL do dia.
+    // Benchmark "capital medido em SOL": FLUXO LÍQUIDO de SOL do trading (recebido nas
+    // vendas − gasto nas compras). solByDate SÓ serve p/ converter pernas em stablecoin;
+    // se não houver nenhuma na janela, evitamos por completo o fetch do candle do SOL.
     let benchmark: Benchmark = { available: false, points: [] };
     if (rows.length > 0) {
-      const solCandles = await this.candles.getCandles(
-        ChainType.SOLANA,
-        Chain.SOLANA,
-        WSOL_MINT,
-        rows[0].blockTime,
-        rows[rows.length - 1].blockTime,
-        '1d',
-      );
-      const solByDate = new Map<string, number>();
-      for (const c of solCandles) {
-        solByDate.set(new Date(c.timeMs).toISOString().slice(0, 10), c.close);
-      }
       const solTrades: SolTradeInput[] = rows.map((r) => ({
         side: r.side,
         blockTimeMs: r.blockTime.getTime(),
         quoteMint: r.quoteMint,
         quoteAmount: r.quoteAmount.toString(),
       }));
+
+      const windowStartMs = windowStart ? windowStart.getTime() : null;
+      const needsSolPrice = rows.some(
+        (r) =>
+          SOL_STABLE_MINTS.has(r.quoteMint) &&
+          (windowStartMs == null || r.blockTime.getTime() >= windowStartMs),
+      );
+
+      const solByDate = new Map<string, number>();
+      if (needsSolPrice) {
+        const solCandles = await this.candles.getCandles(
+          ChainType.SOLANA,
+          Chain.SOLANA,
+          WSOL_MINT,
+          rows[0].blockTime,
+          rows[rows.length - 1].blockTime,
+          '1d',
+        );
+        for (const c of solCandles) {
+          solByDate.set(new Date(c.timeMs).toISOString().slice(0, 10), c.close);
+        }
+      }
+
       benchmark = computeSolBenchmark(solTrades, solByDate, {
         windowStart,
         tzOffsetMinutes,
