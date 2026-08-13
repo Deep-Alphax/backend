@@ -14,7 +14,7 @@ import { Type } from 'class-transformer';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AnalyticsService } from './analytics.service';
 import { HttpCacheInterceptor } from '../../common/interceptors/http-cache.interceptor';
-import { CacheTTL } from '../../common/decorators/cache.decorator';
+import { CacheTTL, NoCache } from '../../common/decorators/cache.decorator';
 
 class MetricsQueryDto {
   @IsOptional()
@@ -51,6 +51,8 @@ class MetricsQueryDto {
 export class AnalyticsController {
   constructor(private readonly analytics: AnalyticsService) {}
 
+  // Sem cache HTTP (mesma razão do portfolio): precisa refletir sync na hora.
+  @NoCache()
   @Get('wallets/:id/analytics')
   @ApiOperation({ summary: 'Métricas de trading de uma carteira (PnL, hold, buckets, etc.)' })
   @ApiQuery({ name: 'period', enum: MetricPeriod, required: false })
@@ -61,6 +63,11 @@ export class AnalyticsController {
     return this.analytics.walletMetrics(req.user.id, id, q.period ?? MetricPeriod.D30, q.tz ?? 0);
   }
 
+  // Sem cache HTTP: logo após sincronizar uma carteira, o dashboard REFAZ esta
+  // query e precisa dos dados frescos. O cache de 60s (memória, sem invalidação por
+  // chave) devolvia o resultado ZERADO cacheado no instante da conexão. O snapshot
+  // em DB (com tradesHash) já é o cache real — recomputa só quando os trades mudam.
+  @NoCache()
   @Get('analytics/portfolio')
   @ApiOperation({ summary: 'Métricas do perfil: agregado do portfólio, ou de uma carteira (walletId)' })
   @ApiQuery({ name: 'period', enum: MetricPeriod, required: false })

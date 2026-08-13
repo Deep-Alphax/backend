@@ -22,6 +22,21 @@ export interface WalletSyncedEvent {
 }
 
 /**
+ * Evento de MUDANÇA DE ESTADO do sync de uma carteira OWN, destinado ao cliente
+ * (empurrado via WebSocket pelo EventsGateway). Diferente de `wallet.synced` (que
+ * só dispara quando há trades novos), este dispara SEMPRE que o sync termina —
+ * inclusive com 0 trades ou erro — para o dashboard sair do estado "sincronizando"
+ * em tempo real, sem polling. Só carteiras OWN (as que alimentam o dashboard).
+ */
+export const WALLET_SYNC_STATE_EVENT = 'wallet.sync.state';
+export interface WalletSyncStateEvent {
+  userId: string;
+  walletId: string;
+  status: SyncStatus;
+  inserted: number;
+}
+
+/**
  * Ingestão do histórico de swaps de carteiras. Estratégia:
  *   - incremental: pagina a partir de `lastSyncedAt` (idempotente por natureza —
  *     `Trade` tem unique (walletId, txHash, baseMint, side) e usamos
@@ -207,6 +222,16 @@ export class WalletSyncService {
         };
         this.events.emit(WALLET_SYNCED_EVENT, payload);
       }
+      // Estado do sync → cliente (WebSocket). SEMPRE que termina (mesmo 0 trades),
+      // para o dashboard reagir em tempo real. Só OWN (alimentam o dashboard).
+      if (wallet.kind === WalletKind.OWN) {
+        this.events.emit(WALLET_SYNC_STATE_EVENT, {
+          userId: wallet.userId,
+          walletId: wallet.id,
+          status: morePages ? SyncStatus.PENDING : SyncStatus.SYNCED,
+          inserted,
+        } satisfies WalletSyncStateEvent);
+      }
       this.logger.log(
         `Wallet ${wallet.id} (${wallet.kind}) ${morePages ? 'parcial (backfill continua)' : 'sincronizada'} ` +
           `(${inserted} trades novos, ${pages} páginas).`,
@@ -232,6 +257,16 @@ export class WalletSyncService {
           nextRetryAt,
         },
       });
+
+      // Estado ERROR → cliente (WebSocket), p/ tirar o dashboard do "sincronizando".
+      if (wallet.kind === WalletKind.OWN) {
+        this.events.emit(WALLET_SYNC_STATE_EVENT, {
+          userId: wallet.userId,
+          walletId: wallet.id,
+          status: SyncStatus.ERROR,
+          inserted: 0,
+        } satisfies WalletSyncStateEvent);
+      }
 
       this.logger.warn(
         `Sync wallet ${wallet.id} ERROR (status=${status ?? 'n/a'}, ` +
