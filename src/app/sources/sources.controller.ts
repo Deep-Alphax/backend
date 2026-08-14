@@ -20,7 +20,7 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { MetricPeriod } from '@prisma/client';
-import { IsEnum, IsOptional } from 'class-validator';
+import { IsEnum, IsOptional, IsString } from 'class-validator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { SourcesService } from './sources.service';
 import {
@@ -33,6 +33,11 @@ class SourcesQueryDto {
   @IsOptional()
   @IsEnum(MetricPeriod)
   period?: MetricPeriod;
+
+  /** Escopa a tab "Fontes" a UMA carteira (a selecionada). Sem ele → agregado. */
+  @IsOptional()
+  @IsString()
+  walletId?: string;
 }
 
 /**
@@ -61,6 +66,7 @@ export class SourcesController {
     return this.sources.getSourcesAnalytics(
       req.user.id,
       q.period ?? MetricPeriod.D30,
+      q.walletId,
     );
   }
 
@@ -76,6 +82,7 @@ export class SourcesController {
     return this.sources.getDiscordSourcesAnalytics(
       req.user.id,
       q.period ?? MetricPeriod.D30,
+      q.walletId,
     );
   }
 

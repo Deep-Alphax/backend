@@ -414,9 +414,24 @@ export class SourcesService {
    * Breakdown "De onde vieram os trades" por fonte. Lê as atribuições persistidas
    * (mantidas frescas pelo sync/config) + os trades OWN do usuário e agrega.
    */
+  /**
+   * Filtro dos trades do usuário para a atribuição. Com `walletId` → SÓ aquela carteira
+   * (escopa a tab "Fontes" à carteira selecionada, igual às outras tabs), validando que
+   * o usuário a cataloga (IDOR). Sem `walletId` → agregado das RASTREADAS (compat).
+   */
+  private userTradeWalletFilter(
+    userId: string,
+    walletId?: string,
+  ): Prisma.WalletWhereInput {
+    return walletId
+      ? { id: walletId, catalog: { some: { userId } } }
+      : { catalog: { some: { userId, role: CatalogRole.TRACKED } } };
+  }
+
   async getSourcesAnalytics(
     userId: string,
     period: MetricPeriod,
+    walletId?: string,
   ): Promise<SourceBreakdown[]> {
     const read = this.prisma.getReadClient();
 
@@ -440,9 +455,7 @@ export class SourcesService {
     }
 
     const rows = await read.trade.findMany({
-      where: {
-        wallet: { catalog: { some: { userId, role: CatalogRole.TRACKED } } },
-      },
+      where: { wallet: this.userTradeWalletFilter(userId, walletId) },
       select: {
         id: true,
         baseMint: true,
@@ -497,13 +510,12 @@ export class SourcesService {
   async getDiscordSourcesAnalytics(
     userId: string,
     period: MetricPeriod,
+    walletId?: string,
   ): Promise<SourceBreakdown[]> {
     const read = this.prisma.getReadClient();
 
     const rows = await read.trade.findMany({
-      where: {
-        wallet: { catalog: { some: { userId, role: CatalogRole.TRACKED } } },
-      },
+      where: { wallet: this.userTradeWalletFilter(userId, walletId) },
       select: {
         id: true,
         baseMint: true,
