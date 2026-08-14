@@ -14,6 +14,8 @@ function trade(over: Partial<SolTradeInput>): SolTradeInput {
   return {
     side: 'BUY',
     blockTimeMs: 0,
+    baseMint: 'TKN',
+    baseAmount: '10',
     quoteMint: WSOL,
     quoteAmount: '1',
     ...over,
@@ -118,52 +120,111 @@ describe('buildBenchmark', () => {
 describe('computeSolBenchmark', () => {
   const noWindow = { windowStart: null, tzOffsetMinutes: 0 };
 
-  it('fluxo líquido WSOL = SOL recebido nas vendas − SOL gasto nas compras', () => {
-    // Gasta 2 SOL comprando; recebe 5 SOL vendendo → fluxo líquido +3 SOL.
+  it('round-trip casado WSOL = proceeds − custo (compra por 2, vende por 5 → +3)', () => {
+    // Compra 10 tokens por 2 SOL; vende os 10 por 5 SOL → PnL realizado +3 SOL.
     const trades = [
-      trade({ side: 'BUY', quoteAmount: '2', blockTimeMs: 0 }),
-      trade({ side: 'SELL', quoteAmount: '5', blockTimeMs: DAY }),
+      trade({
+        side: 'BUY',
+        baseAmount: '10',
+        quoteAmount: '2',
+        blockTimeMs: 0,
+      }),
+      trade({
+        side: 'SELL',
+        baseAmount: '10',
+        quoteAmount: '5',
+        blockTimeMs: DAY,
+      }),
     ];
     const r = computeSolBenchmark(trades, new Map(), noWindow);
     expect(r.available).toBe(true);
+    // Só a venda gera ponto (a compra é deploy neutro, não vira ponto negativo).
+    expect(r.points).toHaveLength(1);
+    expect(r.points[0].portfolioInSol).toBe('3.0000');
+  });
+
+  it('deploy de capital NÃO vira prejuízo: a curva não mergulha no negativo no 1º dia', () => {
+    // Regressão do bug: compra 10 tokens por 30 SOL no dia 1, vende por 33 no dia 2.
+    // A linha antiga (fluxo de caixa) despencava p/ −30 no dia 1. Agora começa em +3.
+    const trades = [
+      trade({
+        side: 'BUY',
+        baseAmount: '10',
+        quoteAmount: '30',
+        blockTimeMs: 0,
+      }),
+      trade({
+        side: 'SELL',
+        baseAmount: '10',
+        quoteAmount: '33',
+        blockTimeMs: DAY,
+      }),
+    ];
+    const r = computeSolBenchmark(trades, new Map(), noWindow);
+    const vals = r.points.map((p) => Number(p.portfolioInSol));
+    expect(Math.min(...vals)).toBeGreaterThanOrEqual(0); // nunca negativa por deploy
     expect(r.points[r.points.length - 1].portfolioInSol).toBe('3.0000');
   });
 
-  it('venda sem compra anterior (posição pré-dados) CONTA como SOL recebido', () => {
-    // Vital p/ histórico incompleto: a venda de um bag comprado antes do 1º trade
-    // sincronizado é SOL real que entrou — o fluxo líquido não pode descartá-la.
-    const trades = [trade({ side: 'SELL', quoteAmount: '9', blockTimeMs: 0 })];
+  it('venda sem lote (posição pré-DADOS) CONTA como proceeds cheio (custo 0)', () => {
+    // Sem compra sincronizada anterior → não há lote → windfall: proceeds cheio.
+    const trades = [
+      trade({
+        side: 'SELL',
+        baseAmount: '10',
+        quoteAmount: '9',
+        blockTimeMs: 0,
+      }),
+    ];
     const r = computeSolBenchmark(trades, new Map(), noWindow);
     expect(r.available).toBe(true);
     expect(r.points[r.points.length - 1].portfolioInSol).toBe('9.0000');
   });
 
-  it('curva acumula por dia (compra abaixa, venda sobe)', () => {
-    const trades = [
-      trade({ side: 'BUY', quoteAmount: '2', blockTimeMs: 0 }), // dia 1: −2
-      trade({ side: 'SELL', quoteAmount: '3', blockTimeMs: DAY }), // dia 2: +3 → +1
-      trade({ side: 'SELL', quoteAmount: '4', blockTimeMs: 2 * DAY }), // dia 3: +4 → +5
-    ];
-    const r = computeSolBenchmark(trades, new Map(), noWindow);
-    expect(r.points.map((p) => p.portfolioInSol)).toEqual([
-      '-2.0000',
-      '1.0000',
-      '5.0000',
-    ]);
-  });
-
-  it('perna em stablecoin é convertida ao preço do SOL do dia', () => {
-    // Gasta 200 USDC; recebe 500 USDC. SOL=100 USD nos dois dias.
-    // → −2 SOL na compra, +5 SOL na venda, fluxo líquido +3 SOL.
+  it('curva acumula por dia; só perda REAL de SOL num round-trip desce a curva', () => {
+    // Compra 10@30 (dia1, neutro). Vende 5@10 dia2: custo casado 15 → −5 (perda real).
+    // Vende 5@40 dia3: custo casado 15 → +25. Cum: 0(implícito) → −5 → +20.
     const trades = [
       trade({
         side: 'BUY',
+        baseAmount: '10',
+        quoteAmount: '30',
+        blockTimeMs: 0,
+      }),
+      trade({
+        side: 'SELL',
+        baseAmount: '5',
+        quoteAmount: '10',
+        blockTimeMs: DAY,
+      }),
+      trade({
+        side: 'SELL',
+        baseAmount: '5',
+        quoteAmount: '40',
+        blockTimeMs: 2 * DAY,
+      }),
+    ];
+    const r = computeSolBenchmark(trades, new Map(), noWindow);
+    expect(r.points.map((p) => p.portfolioInSol)).toEqual([
+      '-5.0000',
+      '20.0000',
+    ]);
+  });
+
+  it('perna em stablecoin: custo e proceeds convertidos ao preço do SOL do dia', () => {
+    // Compra 10 tokens por 200 USDC; vende por 500 USDC. SOL=100 USD nos dois dias.
+    // → custo 2 SOL, proceeds 5 SOL, realizado +3 SOL.
+    const trades = [
+      trade({
+        side: 'BUY',
+        baseAmount: '10',
         quoteMint: USDC,
         quoteAmount: '200',
         blockTimeMs: 0,
       }),
       trade({
         side: 'SELL',
+        baseAmount: '10',
         quoteMint: USDC,
         quoteAmount: '500',
         blockTimeMs: DAY,
@@ -180,31 +241,45 @@ describe('computeSolBenchmark', () => {
     );
   });
 
-  it('janela: conta só trades com blockTime dentro da janela', () => {
-    // Compra fora da janela (−2, ignorada) e venda dentro (+5) → +5 SOL na janela.
+  it('janela: compra pré-janela dá base de custo; só a venda na janela realiza', () => {
+    // Compra 10@2 fora da janela (base de custo preservada) e vende 10@5 dentro.
+    // Realizado no período = proceeds 5 − custo 2 = +3 (não +5).
     const trades = [
-      trade({ side: 'BUY', quoteAmount: '2', blockTimeMs: 0 }),
-      trade({ side: 'SELL', quoteAmount: '5', blockTimeMs: 10 * DAY }),
+      trade({
+        side: 'BUY',
+        baseAmount: '10',
+        quoteAmount: '2',
+        blockTimeMs: 0,
+      }),
+      trade({
+        side: 'SELL',
+        baseAmount: '10',
+        quoteAmount: '5',
+        blockTimeMs: 10 * DAY,
+      }),
     ];
     const r = computeSolBenchmark(trades, new Map(), {
       windowStart: new Date(5 * DAY),
       tzOffsetMinutes: 0,
     });
     expect(r.points).toHaveLength(1);
-    expect(r.points[0].portfolioInSol).toBe('5.0000');
+    expect(r.points[0].portfolioInSol).toBe('3.0000');
   });
 
-  it('quote desconhecida não distorce (contribui 0 SOL)', () => {
+  it('quote desconhecida é ignorada por completo (não realiza perda espúria)', () => {
+    // Nem empilha lote na compra, nem realiza na venda → sem pontos.
     const trades = [
       trade({
         side: 'BUY',
         quoteMint: 'XyZ',
+        baseAmount: '10',
         quoteAmount: '5',
         blockTimeMs: 0,
       }),
       trade({
         side: 'SELL',
         quoteMint: 'XyZ',
+        baseAmount: '10',
         quoteAmount: '9',
         blockTimeMs: DAY,
       }),
@@ -212,6 +287,35 @@ describe('computeSolBenchmark', () => {
     const r = computeSolBenchmark(trades, new Map(), noWindow);
     expect(r.available).toBe(false);
     expect(r.points).toHaveLength(0);
+  });
+
+  it('FIFO por token: lotes não cruzam entre mints diferentes', () => {
+    // Compra AAA@3 e BBB@10; vende AAA@5 → só casa contra AAA (custo 3) = +2.
+    const trades = [
+      trade({
+        side: 'BUY',
+        baseMint: 'AAA',
+        baseAmount: '10',
+        quoteAmount: '3',
+        blockTimeMs: 0,
+      }),
+      trade({
+        side: 'BUY',
+        baseMint: 'BBB',
+        baseAmount: '10',
+        quoteAmount: '10',
+        blockTimeMs: 0,
+      }),
+      trade({
+        side: 'SELL',
+        baseMint: 'AAA',
+        baseAmount: '10',
+        quoteAmount: '5',
+        blockTimeMs: DAY,
+      }),
+    ];
+    const r = computeSolBenchmark(trades, new Map(), noWindow);
+    expect(r.points[r.points.length - 1].portfolioInSol).toBe('2.0000');
   });
 });
 

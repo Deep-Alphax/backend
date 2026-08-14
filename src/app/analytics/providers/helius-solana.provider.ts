@@ -46,8 +46,13 @@ export class HeliusSolanaProvider {
   ]);
   /** TTL (s) do cache do mapa preço-do-SOL-por-dia (fechamento diário é imutável). */
   private static readonly SOLUSD_TTL = 24 * 60 * 60;
-  /** TTL (s) do snapshot de token resolvido (preço/liquidez muda devagar p/ survival). */
-  private static readonly SNAP_TTL_OK = 6 * 60 * 60;
+  /**
+   * TTL (s) do snapshot de token resolvido. Além de survival, o PREÇO alimenta o PnL
+   * NÃO-REALIZADO (valor das posições em carteira) — que precisa ser fresco. Mantido
+   * ABAIXO do TTL do cache de extras (30min) para que cada recomputo pegue preço novo.
+   * DexScreener é keyless (custo zero), então frescor sai de graça.
+   */
+  private static readonly SNAP_TTL_OK = 5 * 60;
   /** TTL (s) do snapshot NÃO resolvido — curto, p/ auto-recuperar de falha transitória. */
   private static readonly SNAP_TTL_MISS = 15 * 60;
 
@@ -156,21 +161,34 @@ export class HeliusSolanaProvider {
 
     const baseFee = t?.feePayer === address ? (Number(t?.fee) || 0) / 1e9 : 0;
 
-    // Delta de SOL NATIVO da carteira nesta tx: é a mudança REAL de saldo — já líquida
-    // de taxa da plataforma (ex.: 1% da Axiom), tips do Jito e rent, todos pagos como
-    // transferências de SOL à parte. A perna WSOL bruta NÃO reflete esses custos e
-    // superestima o resultado. Menos a base fee (deduzida fora dos transfers).
+    // Delta de SOL NATIVO da carteira nesta tx: a mudança REAL de saldo — já líquida de
+    // taxa da plataforma (ex.: 1% da Axiom), tips do Jito, base fee e rent (todos saem do
+    // saldo). A perna WSOL bruta NÃO reflete esses custos e superestima o resultado.
+    //
+    // FONTE = `accountData[].nativeBalanceChange` (mudança LÍQUIDA de saldo), NÃO a soma
+    // de `nativeTransfers`: em vendas pagas em SOL nativo (pump.fun/bonding curve), os
+    // proventos NÃO aparecem como nativeTransfer — só como balance change — então somar
+    // transfers capturava apenas as taxas (saídas) e zerava a venda (prejuízo fantasma).
     let solNative = 0;
     let hasNative = false;
-    for (const n of t?.nativeTransfers ?? []) {
-      const a = (Number(n?.amount) || 0) / 1e9;
-      if (n.fromUserAccount === address) {
-        solNative -= a;
-        hasNative = true;
-      }
-      if (n.toUserAccount === address) {
-        solNative += a;
-        hasNative = true;
+    const selfAcct = (t?.accountData ?? []).find(
+      (a: any) => a?.account === address,
+    );
+    if (selfAcct && Number.isFinite(Number(selfAcct.nativeBalanceChange))) {
+      solNative = Number(selfAcct.nativeBalanceChange) / 1e9;
+      hasNative = solNative !== 0;
+    } else {
+      // Fallback (sem accountData): soma dos transfers, comportamento antigo.
+      for (const n of t?.nativeTransfers ?? []) {
+        const a = (Number(n?.amount) || 0) / 1e9;
+        if (n.fromUserAccount === address) {
+          solNative -= a;
+          hasNative = true;
+        }
+        if (n.toUserAccount === address) {
+          solNative += a;
+          hasNative = true;
+        }
       }
     }
 
@@ -195,7 +213,9 @@ export class HeliusSolanaProvider {
       if (wsolLeg >= 1e-12 && Math.abs(solNative) < 0.5 * wsolLeg) {
         quoteAmount = wsolLeg; // nativo incidental → perna WSOL
       } else if (hasNative && Math.abs(solNative) > 1e-9) {
-        quoteAmount = Math.abs(solNative - baseFee); // swap liquidado em SOL nativo
+        // Swap liquidado em SOL nativo: a mudança líquida de saldo (já inclui a base
+        // fee/tips) É o valor real do swap. feeNative registra a base fee à parte.
+        quoteAmount = Math.abs(solNative);
       } else {
         quoteAmount = wsolLeg; // 0 quando não há perna SOL → filtrado abaixo
       }

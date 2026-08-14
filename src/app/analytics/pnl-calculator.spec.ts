@@ -1,5 +1,9 @@
 import { TradeSide } from '@prisma/client';
-import { computePnl, computeClosedPositions } from './pnl-calculator';
+import {
+  computePnl,
+  computeClosedPositions,
+  computeOpenPositions,
+} from './pnl-calculator';
 import { TradeInput } from './pnl-types';
 
 const BASE = new Date('2026-07-01T10:00:00Z').getTime();
@@ -24,8 +28,10 @@ function trade(
     priceResolved: opts.priceResolved ?? true,
   };
 }
-const buy = (a: number, p: number, off: number, o = {}) => trade(TradeSide.BUY, a, p, off, o);
-const sell = (a: number, p: number, off: number, o = {}) => trade(TradeSide.SELL, a, p, off, o);
+const buy = (a: number, p: number, off: number, o = {}) =>
+  trade(TradeSide.BUY, a, p, off, o);
+const sell = (a: number, p: number, off: number, o = {}) =>
+  trade(TradeSide.SELL, a, p, off, o);
 const ALL = { windowStart: null, tzOffsetMinutes: 0 };
 
 describe('computePnl', () => {
@@ -50,7 +56,10 @@ describe('computePnl', () => {
   it('separa hold time de winners e losers (ponderado por quantidade)', () => {
     // Venda 1 (winner) casa lote antigo (2h) e parte do novo (1h) → 6000s
     // Venda 2 (loser) casa o resto do lote novo (2h a partir da compra) → 7200s
-    const r = computePnl([buy(10, 1, 0), buy(10, 2, 1), sell(15, 3, 2), sell(5, 0.5, 3)], ALL);
+    const r = computePnl(
+      [buy(10, 1, 0), buy(10, 2, 1), sell(15, 3, 2), sell(5, 0.5, 3)],
+      ALL,
+    );
     expect(r.avgHoldSecondsWinners).toBe(6000);
     expect(r.avgHoldSecondsLosers).toBe(7200);
     expect(r.realizedPnlUsd).toBe('17.50'); // 25 + (5*(0.5-2)) = 25 - 7.5
@@ -94,7 +103,10 @@ describe('computePnl', () => {
     expect(r.tradingPnlUsd).toBe('20.00');
     expect(r.windfallProceedsUsd).toBe('20.00');
     // Acumulado: 20 no dia 1 e CONTINUA 20 no dia 2 (o windfall não soma).
-    expect(r.capital.points.map((p) => p.cumulativePnlUsd)).toEqual(['20.00', '20.00']);
+    expect(r.capital.points.map((p) => p.cumulativePnlUsd)).toEqual([
+      '20.00',
+      '20.00',
+    ]);
     expect(r.capital.daysInGreen).toBe(1); // dia do windfall não é "dia no verde"
     expect(r.perDay.worstDay?.realizedPnlUsd).toBe('0.00'); // dia do windfall = 0, não +20
   });
@@ -102,7 +114,10 @@ describe('computePnl', () => {
   it('atribui PnL só na janela, mas usa compras anteriores para a base de custo', () => {
     // Compra fora da janela, venda dentro → PnL contabiliza mesmo com a compra antiga.
     const windowStart = new Date(BASE + 1.5 * H);
-    const r = computePnl([buy(10, 1, 0), sell(10, 3, 2)], { windowStart, tzOffsetMinutes: 0 });
+    const r = computePnl([buy(10, 1, 0), sell(10, 3, 2)], {
+      windowStart,
+      tzOffsetMinutes: 0,
+    });
     expect(r.buys).toBe(0); // compra fora da janela não conta como trade
     expect(r.sells).toBe(1);
     expect(r.realizedPnlUsd).toBe('20.00'); // base de custo veio da compra pré-janela
@@ -123,7 +138,10 @@ describe('computePnl', () => {
 
   it('bucketiza por hora do dia aplicando o offset de fuso', () => {
     // 10:00 UTC → 07:00 em BRT (-180 min)
-    const r = computePnl([buy(1, 1, 0)], { windowStart: null, tzOffsetMinutes: -180 });
+    const r = computePnl([buy(1, 1, 0)], {
+      windowStart: null,
+      tzOffsetMinutes: -180,
+    });
     const active = r.hourly.filter((h) => h.trades > 0);
     expect(active).toHaveLength(1);
     expect(active[0].hour).toBe(7);
@@ -174,7 +192,10 @@ describe('computePnl', () => {
 
   it('reporta confiança pela fração de trades com preço resolvido', () => {
     const r = computePnl(
-      [buy(10, 1, 0, { priceResolved: true }), sell(10, 2, 1, { priceResolved: false })],
+      [
+        buy(10, 1, 0, { priceResolved: true }),
+        sell(10, 2, 1, { priceResolved: false }),
+      ],
       ALL,
     );
     expect(r.confidence.priceResolvedPct).toBe(50);
@@ -261,7 +282,13 @@ describe('computePnl', () => {
       sell(1, 100 - loss, i * 2 + 1, { mint: `L${i}`, symbol: `L${i}` }),
     ];
     const r = computePnl(
-      [...winner(100, 0), ...winner(50, 1), ...winner(30, 2), ...loser(85, 3), ...loser(85, 4)],
+      [
+        ...winner(100, 0),
+        ...winner(50, 1),
+        ...winner(30, 2),
+        ...loser(85, 3),
+        ...loser(85, 4),
+      ],
       ALL,
     );
 
@@ -274,7 +301,11 @@ describe('computePnl', () => {
     expect(r.profitConcentration.next7.count).toBe(0);
     expect(r.profitConcentration.rest.count).toBe(0);
     // nenhum bucket ultrapassa 100% nem fica negativo.
-    for (const b of [r.profitConcentration.top3, r.profitConcentration.next7, r.profitConcentration.rest]) {
+    for (const b of [
+      r.profitConcentration.top3,
+      r.profitConcentration.next7,
+      r.profitConcentration.rest,
+    ]) {
       expect(b.pct).toBeGreaterThanOrEqual(0);
       expect(b.pct).toBeLessThanOrEqual(100);
     }
@@ -316,7 +347,10 @@ describe('computePnl', () => {
       ],
       ALL,
     );
-    expect(r.capital.points.map((p) => p.cumulativePnlUsd)).toEqual(['20.00', '-20.00']);
+    expect(r.capital.points.map((p) => p.cumulativePnlUsd)).toEqual([
+      '20.00',
+      '-20.00',
+    ]);
     expect(r.capital.maxDrawdownUsd).toBe('40.00'); // pico 20 → vale -20
     expect(r.capital.daysInGreen).toBe(1);
   });
@@ -340,7 +374,10 @@ describe('computePnl', () => {
   });
 
   it('extrai posições fechadas (FIFO) com entrada/saída p/ o engine de pico', () => {
-    const r = computeClosedPositions([buy(10, 1, 0), buy(10, 2, 1), sell(15, 3, 2)], ALL);
+    const r = computeClosedPositions(
+      [buy(10, 1, 0), buy(10, 2, 1), sell(15, 3, 2)],
+      ALL,
+    );
     expect(r).toHaveLength(1);
     expect(r[0].qty).toBe(15);
     // custo médio casado = (10*1 + 5*2)/15 = 20/15 = 1.333...
@@ -358,7 +395,9 @@ describe('computePnl', () => {
     expect(cell.realizedPnlUsd).toBe('20.00'); // (3-1)*10 na venda
     expect(cell.avgPnlPerTradeUsd).toBe('10.00'); // 20 / 2 trades
     // Células sem trade ficam zeradas.
-    const empty = r.weekdayBlocks.find((c) => c.weekday === 6 && c.block === 5)!;
+    const empty = r.weekdayBlocks.find(
+      (c) => c.weekday === 6 && c.block === 5,
+    )!;
     expect(empty.trades).toBe(0);
     expect(empty.realizedPnlUsd).toBe('0.00');
   });
@@ -370,5 +409,48 @@ describe('computePnl', () => {
     expect(r.outcomes).toHaveLength(5);
     expect(r.capital.points).toEqual([]);
     expect(r.capital.maxDrawdownUsd).toBe('0.00');
+  });
+});
+
+describe('computeOpenPositions', () => {
+  it('posição parcialmente vendida → sobra qty com base de custo FIFO', () => {
+    // Compra 10 @ $2; vende 4. Sobra 6 @ custo $2 = $12.
+    const pos = computeOpenPositions([buy(10, 2, 0), sell(4, 3, 1)]);
+    expect(pos).toHaveLength(1);
+    expect(pos[0].mint).toBe('TOK');
+    expect(Number(pos[0].qty)).toBeCloseTo(6, 9);
+    expect(pos[0].costUsd).toBe('12.00');
+  });
+
+  it('posição totalmente vendida → não aparece', () => {
+    expect(computeOpenPositions([buy(10, 2, 0), sell(10, 3, 1)])).toHaveLength(
+      0,
+    );
+  });
+
+  it('venda sem lote (windfall) NÃO gera posição negativa', () => {
+    expect(computeOpenPositions([sell(5, 3, 0)])).toHaveLength(0);
+  });
+
+  it('custo da sobra é FIFO (consome o lote mais antigo primeiro)', () => {
+    // Compra 10@$1, 10@$3; vende 5 (casa no lote de $1). Sobra 5@$1 + 10@$3 = $35.
+    const pos = computeOpenPositions([
+      buy(10, 1, 0),
+      buy(10, 3, 1),
+      sell(5, 5, 2),
+    ]);
+    expect(Number(pos[0].qty)).toBeCloseTo(15, 9);
+    expect(pos[0].costUsd).toBe('35.00');
+  });
+
+  it('separa posições abertas por token', () => {
+    const pos = computeOpenPositions([
+      buy(10, 2, 0, { mint: 'AAA' }),
+      buy(5, 4, 1, { mint: 'BBB' }),
+      sell(10, 3, 2, { mint: 'AAA' }), // AAA zera
+    ]);
+    expect(pos).toHaveLength(1);
+    expect(pos[0].mint).toBe('BBB');
+    expect(pos[0].costUsd).toBe('20.00');
   });
 });

@@ -11,10 +11,14 @@ import {
   MetricPeriod,
   MetricScope,
   Prisma,
-  WalletKind,
+  CatalogRole,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { computePnl, computeClosedPositions } from './pnl-calculator';
+import {
+  computePnl,
+  computeClosedPositions,
+  computeOpenPositions,
+} from './pnl-calculator';
 import {
   computePeakMetrics,
   computeSolBenchmark,
@@ -27,6 +31,7 @@ import {
   PeakMetrics,
   Survival,
   Benchmark,
+  Unrealized,
 } from './profile-metrics.types';
 import {
   MARKET_DATA_PROVIDER,
@@ -35,6 +40,7 @@ import {
 } from './providers/market-data-provider.interface';
 import { CandleService, CandleFull } from './candle.service';
 import { CacheRedisService } from '../../common/services/cache-redis.service';
+import { WalletSyncService } from './ingestion/wallet-sync.service';
 
 /** Dias de janela por período. M12 = 365 (ano corrido). */
 const PERIOD_DAYS: Record<MetricPeriod, number> = {
@@ -88,6 +94,8 @@ export class AnalyticsService {
     @Optional() private readonly candles?: CandleService,
     // Cache do Bloco 2 (fail-open): sem Redis, recomputa sempre (comportamento antigo).
     @Optional() private readonly cache?: CacheRedisService,
+    // "Portão de frescor": ao abrir uma carteira, dispara gap-fill se estiver stale.
+    @Optional() private readonly walletSync?: WalletSyncService,
   ) {}
 
   /**
@@ -101,21 +109,23 @@ export class AnalyticsService {
   ): Promise<{ balanceUsd: string | null }> {
     if (!this.provider?.fetchWalletBalanceUsd) return { balanceUsd: null };
 
-    const wallets = await this.prisma.getReadClient().wallet.findMany({
+    // Escopo via catálogo: com walletId, aquela carteira (se catalogada); sem ele, as
+    // carteiras RASTREADAS do usuário. Dados on-chain são compartilhados (carteira canônica).
+    const entries = await this.prisma.getReadClient().walletCatalog.findMany({
       where: {
         userId,
-        kind: WalletKind.OWN,
-        ...(walletId ? { id: walletId } : {}),
+        ...(walletId ? { walletId } : { role: CatalogRole.TRACKED }),
       },
-      select: { chain: true, address: true },
+      select: { wallet: { select: { chain: true, address: true } } },
     });
-    if (wallets.length === 0) return { balanceUsd: null };
+    if (entries.length === 0) return { balanceUsd: null };
 
     const results = await Promise.all(
-      wallets.map((w) =>
-        this.provider!.fetchWalletBalanceUsd!(w.chain, w.address).catch(
-          () => null,
-        ),
+      entries.map((e) =>
+        this.provider!.fetchWalletBalanceUsd!(
+          e.wallet.chain,
+          e.wallet.address,
+        ).catch(() => null),
       ),
     );
     const values = results.filter((v): v is string => v != null);
@@ -132,11 +142,11 @@ export class AnalyticsService {
     period: MetricPeriod,
     tzOffsetMinutes: number,
   ): Promise<PnlResult> {
-    const wallet = await this.prisma.getReadClient().wallet.findFirst({
-      where: { id: walletId, userId, kind: WalletKind.OWN }, // ownership; fontes não têm métricas próprias
+    const entry = await this.prisma.getReadClient().walletCatalog.findUnique({
+      where: { userId_walletId: { userId, walletId } }, // acesso: só carteira catalogada
       select: { id: true },
     });
-    if (!wallet) throw new NotFoundException('Carteira não encontrada');
+    if (!entry) throw new NotFoundException('Carteira não encontrada');
 
     return this.computeCached(
       userId,
@@ -166,22 +176,29 @@ export class AnalyticsService {
     let scopeWalletId: string | null;
 
     if (walletId) {
-      const owned = await read.wallet.findFirst({
-        where: { id: walletId, userId, kind: WalletKind.OWN }, // ownership + só OWN
+      const entry = await read.walletCatalog.findUnique({
+        where: { userId_walletId: { userId, walletId } }, // acesso: só carteira catalogada
         select: { id: true },
       });
-      if (!owned) throw new NotFoundException('Carteira não encontrada');
+      if (!entry) throw new NotFoundException('Carteira não encontrada');
       walletIds = [walletId];
       scope = MetricScope.WALLET;
       scopeWalletId = walletId;
     } else {
-      const wallets = await read.wallet.findMany({
-        where: { userId, kind: WalletKind.OWN }, // só carteiras do usuário (exclui fontes)
-        select: { id: true },
+      // Sem walletId: agrega as carteiras RASTREADAS do catálogo (fontes ficam de fora).
+      const entries = await read.walletCatalog.findMany({
+        where: { userId, role: CatalogRole.TRACKED },
+        select: { walletId: true },
       });
-      walletIds = wallets.map((w) => w.id);
+      walletIds = entries.map((e) => e.walletId);
       scope = MetricScope.PORTFOLIO;
       scopeWalletId = null;
+    }
+
+    // Gap-fill ao abrir: dispara sync incremental das carteiras stale (não bloqueia;
+    // o WebSocket avisa quando entrarem trades novos). Reusa o cache compartilhado.
+    if (this.walletSync) {
+      for (const id of walletIds) void this.walletSync.ensureFresh(id);
     }
 
     const base = await this.computeCached(
@@ -275,6 +292,7 @@ export class AnalyticsService {
     peaks: PeakMetrics;
     survival: Survival;
     benchmark: Benchmark;
+    unrealized: Unrealized;
   } {
     return {
       peaks: {
@@ -292,6 +310,12 @@ export class AnalyticsService {
         unknown: 0,
       },
       benchmark: { available: false, points: [] },
+      unrealized: {
+        available: false,
+        unrealizedPnlUsd: null,
+        openPositions: 0,
+        pricedPositions: 0,
+      },
     };
   }
 
@@ -299,7 +323,12 @@ export class AnalyticsService {
     walletIds: string[],
     period: MetricPeriod,
     tzOffsetMinutes: number,
-  ): Promise<{ peaks: PeakMetrics; survival: Survival; benchmark: Benchmark }> {
+  ): Promise<{
+    peaks: PeakMetrics;
+    survival: Survival;
+    benchmark: Benchmark;
+    unrealized: Unrealized;
+  }> {
     if (!this.provider || !this.candles || walletIds.length === 0)
       return this.emptyExtras();
 
@@ -313,14 +342,16 @@ export class AnalyticsService {
       _count: { _all: true },
       _max: { createdAt: true },
     });
+    // v2: o objeto cacheado ganhou `unrealized` — a versão invalida caches v1 (sem ele).
     const cacheKey =
-      `analytics:extras:v1:${period}:${tzOffsetMinutes}:` +
+      `analytics:extras:v2:${period}:${tzOffsetMinutes}:` +
       `${this.hashWalletIds(walletIds)}:${sig._count._all}:${sig._max.createdAt?.getTime() ?? 0}`;
 
     const cached = await this.cache?.getJson<{
       peaks: PeakMetrics;
       survival: Survival;
       benchmark: Benchmark;
+      unrealized: Unrealized;
     }>(cacheKey);
     if (cached) return cached;
 
@@ -338,11 +369,15 @@ export class AnalyticsService {
       orderBy: { blockTime: 'asc' },
     });
 
-    const positions = computeClosedPositions(rows.map(toTradeInput), {
+    const tradeInputs = rows.map(toTradeInput);
+    const positions = computeClosedPositions(tradeInputs, {
       windowStart,
       tzOffsetMinutes,
     });
-    if (positions.length === 0) return this.emptyExtras();
+    // Posições AINDA em carteira (holdings atuais) → base do PnL não-realizado.
+    const openPositions = computeOpenPositions(tradeInputs);
+    if (positions.length === 0 && openPositions.length === 0)
+      return this.emptyExtras();
 
     // mint → chain (primeira ocorrência) e janela de hold por mint.
     const mintChain = new Map<string, { chainType: ChainType; chain: Chain }>();
@@ -413,6 +448,44 @@ export class AnalyticsService {
     });
     const survival = computeSurvival(statuses);
 
+    // ── PnL NÃO-REALIZADO: valor atual das posições abertas − base de custo ──
+    // Reusa os snapshots já buscados (survival); busca em lote os mints das posições
+    // abertas que ainda não têm preço. Token sem preço (rugado) → valor 0 = perda total.
+    const openMints = openPositions.map((o) => o.mint);
+    const missingByChain = new Map<Chain, string[]>();
+    for (const mint of openMints) {
+      if (snapByMint.has(mint)) continue;
+      const cc = mintChain.get(mint);
+      if (!cc) continue;
+      const arr = missingByChain.get(cc.chain) ?? [];
+      arr.push(mint);
+      missingByChain.set(cc.chain, arr);
+    }
+    for (const [chain, chainMints] of missingByChain) {
+      try {
+        const m = await this.provider.fetchTokenSnapshots(chain, chainMints);
+        for (const [k, v] of m) snapByMint.set(k, v);
+      } catch {
+        // best-effort: sem preço → conta como valor 0 (perda total)
+      }
+    }
+    let unrealizedUsd = 0;
+    let pricedPositions = 0;
+    for (const o of openPositions) {
+      const snap = snapByMint.get(o.mint);
+      const price = snap?.priceUsd != null ? Number(snap.priceUsd) : 0;
+      if (price > 0) pricedPositions += 1;
+      const value = Number(o.qty) * price; // 0 se sem preço (token morto)
+      unrealizedUsd += value - Number(o.costUsd);
+    }
+    const unrealized: Unrealized = {
+      available: openPositions.length > 0,
+      unrealizedPnlUsd:
+        openPositions.length > 0 ? unrealizedUsd.toFixed(2) : null,
+      openPositions: openPositions.length,
+      pricedPositions,
+    };
+
     // Benchmark "capital medido em SOL": FLUXO LÍQUIDO de SOL do trading (recebido nas
     // vendas − gasto nas compras). solByDate SÓ serve p/ converter pernas em stablecoin;
     // se não houver nenhuma na janela, evitamos por completo o fetch do candle do SOL.
@@ -421,6 +494,8 @@ export class AnalyticsService {
       const solTrades: SolTradeInput[] = rows.map((r) => ({
         side: r.side,
         blockTimeMs: r.blockTime.getTime(),
+        baseMint: r.baseMint,
+        baseAmount: r.baseAmount.toString(),
         quoteMint: r.quoteMint,
         quoteAmount: r.quoteAmount.toString(),
       }));
@@ -453,7 +528,7 @@ export class AnalyticsService {
       });
     }
 
-    const extras = { peaks, survival, benchmark };
+    const extras = { peaks, survival, benchmark, unrealized };
     await this.cache?.setJson(cacheKey, extras, EXTRAS_TTL_SECONDS);
     return extras;
   }

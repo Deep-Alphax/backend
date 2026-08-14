@@ -1,248 +1,197 @@
-import {
-  BadRequestException,
-  ConflictException,
-  NotFoundException,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { Chain, Prisma, SyncStatus, WalletKind } from '@prisma/client';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { Chain, SyncStatus, CatalogRole } from '@prisma/client';
 import { WalletsService } from './wallets.service';
-import { verifyWalletSignature } from './wallet-signature.util';
-
-// A verificação criptográfica é testada em wallet-signature.util.spec.ts; aqui
-// mockamos para focar na orquestração (nonce, idempotência, sync, ownership).
-jest.mock('./wallet-signature.util', () => ({
-  buildVerificationMessage: jest.fn(() => 'verify-message'),
-  verifyWalletSignature: jest.fn(() => true),
-}));
-const mockVerify = verifyWalletSignature as jest.Mock;
 
 const EVM_ADDR = '0xd8da6bf26964af9d7eed9e03e53415d37aa96045';
+const EVM_CHECKSUM = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 const USER = 'user-1';
 
-/** DTO de create com assinatura (default), sobrescrevível. */
-const createDto = (over: Partial<{ chain: Chain; address: string; signature: string; label: string }> = {}) => ({
+const catalogDto = (
+  over: Partial<{ chain: Chain; address: string; label: string }> = {},
+) => ({
   chain: Chain.ETHEREUM,
   address: EVM_ADDR,
-  signature: 'sig',
+  ...over,
+});
+
+/** Entrada de catálogo no shape que o CATALOG_SELECT devolve. */
+const entry = (over: Record<string, unknown> = {}) => ({
+  role: CatalogRole.TRACKED,
+  label: null,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+  wallet: {
+    id: 'w1',
+    chain: Chain.ETHEREUM,
+    chainType: 'EVM',
+    address: EVM_CHECKSUM,
+    isActive: true,
+    syncStatus: SyncStatus.PENDING,
+    lastSyncedAt: null,
+    firstTxAt: null,
+  },
   ...over,
 });
 
 function makeService() {
   const client = {
     wallet: {
-      count: jest.fn(),
+      upsert: jest.fn().mockResolvedValue({ id: 'w1' }),
+      update: jest.fn().mockResolvedValue({ id: 'w1' }),
+    },
+    walletCatalog: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      findUnique: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
       create: jest.fn(),
-      findMany: jest.fn(),
-      findFirst: jest.fn(),
       update: jest.fn(),
-      delete: jest.fn(),
+      upsert: jest.fn().mockResolvedValue(entry()),
+      delete: jest.fn().mockResolvedValue({}),
     },
   };
   const prisma: any = {
     getReadClient: () => client,
     getWriteClient: () => client,
   };
-  const walletSync: any = { syncWallet: jest.fn().mockResolvedValue(undefined) };
-  // Cache do nonce: por padrão devolve a mensagem (verificação "válida").
-  const cache: any = {
-    get: jest.fn().mockResolvedValue('verify-message'),
-    set: jest.fn().mockResolvedValue(undefined),
-    del: jest.fn().mockResolvedValue(undefined),
-  };
-  const service = new WalletsService(prisma, walletSync, cache);
-  return { service, client, walletSync, cache };
+  const walletSync: any = { ensureFresh: jest.fn().mockResolvedValue(true) };
+  const service = new WalletsService(prisma, walletSync);
+  return { service, client, walletSync };
 }
 
-beforeEach(() => {
-  mockVerify.mockReturnValue(true);
-});
-
 describe('WalletsService', () => {
-  describe('requestVerificationNonce', () => {
-    it('normaliza o endereço, gera a mensagem e guarda no cache (TTL)', async () => {
-      const { service, cache } = makeService();
-      const res = await service.requestVerificationNonce(USER, { chain: Chain.ETHEREUM, address: EVM_ADDR });
-      expect(res.message).toBe('verify-message');
-      expect(cache.set).toHaveBeenCalledTimes(1);
-      // chave inclui o addressNorm (lowercase EVM).
-      expect(cache.set.mock.calls[0][0]).toContain(EVM_ADDR);
-    });
-  });
-
-  describe('create', () => {
-    it('cria carteira com endereço normalizado e syncStatus PENDING', async () => {
+  describe('catalogWallet', () => {
+    it('SEM assinatura: upsert da carteira canônica por (chain, addressNorm) + entrada de catálogo', async () => {
       const { service, client } = makeService();
-      client.wallet.count.mockResolvedValue(0);
-      client.wallet.create.mockImplementation(({ data }) => Promise.resolve({ id: 'w1', ...data }));
-
-      const res = await service.create(USER, createDto({ label: ' meu ' }));
-
-      const arg = client.wallet.create.mock.calls[0][0].data;
-      expect(arg.userId).toBe(USER);
-      expect(arg.address).toBe('0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045'); // checksum
-      expect(arg.addressNorm).toBe(EVM_ADDR);
-      expect(arg.chainType).toBe('EVM');
-      expect(arg.label).toBe('meu'); // trim
-      expect(arg.syncStatus).toBe(SyncStatus.PENDING);
-      expect(res.id).toBe('w1');
-    });
-
-    it('exige a prova de posse: verificação expirada (sem nonce) → BadRequest', async () => {
-      const { service, client, cache } = makeService();
-      cache.get.mockResolvedValueOnce(undefined); // nonce ausente/expirado
-      await expect(service.create(USER, createDto())).rejects.toBeInstanceOf(BadRequestException);
-      expect(client.wallet.create).not.toHaveBeenCalled();
-    });
-
-    it('rejeita assinatura inválida com Unauthorized (não cadastra)', async () => {
-      const { service, client } = makeService();
-      mockVerify.mockReturnValueOnce(false);
-      await expect(service.create(USER, createDto())).rejects.toBeInstanceOf(UnauthorizedException);
-      expect(client.wallet.create).not.toHaveBeenCalled();
-    });
-
-    it('consome o nonce (single-use) após verificar', async () => {
-      const { service, client, cache } = makeService();
-      client.wallet.count.mockResolvedValue(0);
-      client.wallet.create.mockImplementation(({ data }: any) => Promise.resolve({ id: 'w1', ...data }));
-      await service.create(USER, createDto());
-      expect(cache.del).toHaveBeenCalledTimes(1);
-    });
-
-    it('dispara a ingestão IMEDIATA da carteira recém-criada (não espera o cron)', async () => {
-      const { service, client, walletSync } = makeService();
-      client.wallet.count.mockResolvedValue(0);
-      client.wallet.create.mockImplementation(({ data }: any) => Promise.resolve({ id: 'w1', ...data }));
-
-      await service.create(USER, createDto());
-
-      expect(walletSync.syncWallet).toHaveBeenCalledTimes(1);
-      expect(walletSync.syncWallet.mock.calls[0][0].id).toBe('w1');
-    });
-
-    it('idempotente: reconectar carteira já cadastrada devolve a existente (sem recriar)', async () => {
-      const { service, client, walletSync } = makeService();
-      client.wallet.findFirst.mockResolvedValue({
-        id: 'w1',
-        kind: WalletKind.OWN,
-        syncStatus: SyncStatus.SYNCED,
-        chain: Chain.ETHEREUM,
-        chainType: 'EVM',
-        address: EVM_ADDR,
-        label: null,
-        isActive: true,
-        lastSyncedAt: null,
-        firstTxAt: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-
-      const res = await service.create(USER, createDto());
-
-      expect(res.id).toBe('w1');
-      expect(client.wallet.create).not.toHaveBeenCalled();
-      expect(walletSync.syncWallet).not.toHaveBeenCalled();
-    });
-
-    it('idempotente: existente em ERROR re-dispara o sync (destrava), sem recriar', async () => {
-      const { service, client, walletSync } = makeService();
-      client.wallet.findFirst.mockResolvedValue({
-        id: 'w1',
-        kind: WalletKind.OWN,
-        syncStatus: SyncStatus.ERROR,
-        chain: Chain.ETHEREUM,
-        chainType: 'EVM',
-        address: EVM_ADDR,
-        label: null,
-        isActive: true,
-        lastSyncedAt: null,
-        firstTxAt: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-
-      await service.create(USER, createDto());
-
-      expect(client.wallet.create).not.toHaveBeenCalled();
-      expect(walletSync.syncWallet).toHaveBeenCalledTimes(1);
-    });
-
-    it('rejeita endereço inválido com BadRequest', async () => {
-      const { service, client } = makeService();
-      client.wallet.count.mockResolvedValue(0);
-      await expect(
-        service.create(USER, createDto({ address: '0xbad' })),
-      ).rejects.toBeInstanceOf(BadRequestException);
-      expect(client.wallet.create).not.toHaveBeenCalled();
-    });
-
-    it('aplica o teto de carteiras por usuário', async () => {
-      const { service, client } = makeService();
-      client.wallet.count.mockResolvedValue(50);
-      await expect(service.create(USER, createDto())).rejects.toThrow(/Limite/);
-      expect(client.wallet.create).not.toHaveBeenCalled();
-    });
-
-    it('converte violação de unique (P2002) em Conflict', async () => {
-      const { service, client } = makeService();
-      client.wallet.count.mockResolvedValue(1);
-      client.wallet.create.mockRejectedValue(
-        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: '6' }),
+      const res = await service.catalogWallet(
+        USER,
+        catalogDto({ label: ' meu ' }),
       );
-      await expect(service.create(USER, createDto())).rejects.toBeInstanceOf(ConflictException);
+
+      // Carteira canônica: upsert pela unique global (não por usuário).
+      const upsertArg = client.wallet.upsert.mock.calls[0][0];
+      expect(upsertArg.where).toEqual({
+        chain_addressNorm: { chain: Chain.ETHEREUM, addressNorm: EVM_ADDR },
+      });
+      expect(upsertArg.create.address).toBe(EVM_CHECKSUM); // checksum EVM
+      expect(upsertArg.create.addressNorm).toBe(EVM_ADDR); // lowercase
+      expect(upsertArg.create.syncStatus).toBe(SyncStatus.PENDING);
+      // NÃO grava userId na carteira (é compartilhada).
+      expect(upsertArg.create.userId).toBeUndefined();
+
+      // Entrada de catálogo: role TRACKED por padrão, rótulo trimado.
+      const catArg = client.walletCatalog.upsert.mock.calls[0][0];
+      expect(catArg.where).toEqual({
+        userId_walletId: { userId: USER, walletId: 'w1' },
+      });
+      expect(catArg.create.role).toBe(CatalogRole.TRACKED);
+      expect(catArg.create.label).toBe('meu');
+      expect(res.id).toBe('w1');
+      expect(res.role).toBe(CatalogRole.TRACKED);
+    });
+
+    it('dispara o gap-fill (ensureFresh) da carteira', async () => {
+      const { service, walletSync } = makeService();
+      await service.catalogWallet(USER, catalogDto());
+      expect(walletSync.ensureFresh).toHaveBeenCalledWith('w1');
+    });
+
+    it('cataloga com papel SOURCE quando pedido', async () => {
+      const { service, client } = makeService();
+      await service.catalogWallet(USER, {
+        ...catalogDto(),
+        role: CatalogRole.SOURCE,
+      });
+      expect(client.walletCatalog.upsert.mock.calls[0][0].create.role).toBe(
+        CatalogRole.SOURCE,
+      );
+    });
+
+    it('idempotente: re-catalogar não conta no teto (não checa count)', async () => {
+      const { service, client } = makeService();
+      client.walletCatalog.findFirst.mockResolvedValue({
+        id: 'c1',
+        walletId: 'w1',
+      });
+      await service.catalogWallet(USER, catalogDto());
+      expect(client.walletCatalog.count).not.toHaveBeenCalled();
+    });
+
+    it('aplica o teto de carteiras catalogadas por usuário', async () => {
+      const { service, client } = makeService();
+      client.walletCatalog.count.mockResolvedValue(50);
+      await expect(service.catalogWallet(USER, catalogDto())).rejects.toThrow(
+        /Limite/,
+      );
+      expect(client.wallet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejeita endereço inválido com BadRequest (sem tocar no banco)', async () => {
+      const { service, client } = makeService();
+      await expect(
+        service.catalogWallet(USER, catalogDto({ address: '0xbad' })),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(client.wallet.upsert).not.toHaveBeenCalled();
     });
   });
 
-  describe('ownership', () => {
-    it('findOne lança NotFound quando a carteira não é do usuário', async () => {
+  describe('acesso (catálogo, não posse)', () => {
+    it('findOne lança NotFound quando o usuário não cataloga a carteira', async () => {
       const { service, client } = makeService();
-      client.wallet.findFirst.mockResolvedValue(null);
-      await expect(service.findOne(USER, 'w1')).rejects.toBeInstanceOf(NotFoundException);
-      expect(client.wallet.findFirst.mock.calls[0][0].where).toEqual({
-        id: 'w1',
-        userId: USER,
-        kind: WalletKind.OWN,
+      client.walletCatalog.findUnique.mockResolvedValue(null);
+      await expect(service.findOne(USER, 'w1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(client.walletCatalog.findUnique.mock.calls[0][0].where).toEqual({
+        userId_walletId: { userId: USER, walletId: 'w1' },
       });
     });
 
-    it('update exige ownership (assertOwnership) antes de escrever', async () => {
+    it('update exige a carteira no catálogo antes de escrever', async () => {
       const { service, client } = makeService();
-      client.wallet.findFirst.mockResolvedValue(null); // não é dono
-      await expect(service.update(USER, 'w1', { label: 'x' })).rejects.toBeInstanceOf(NotFoundException);
+      client.walletCatalog.findUnique.mockResolvedValue(null); // não cataloga
+      await expect(
+        service.update(USER, 'w1', { label: 'x' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(client.walletCatalog.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('remove', () => {
+    it('remove só a entrada de catálogo; desativa a carteira quando fica sem catalogadores', async () => {
+      const { service, client } = makeService();
+      client.walletCatalog.findUnique.mockResolvedValue({ id: 'c1' }); // cataloga
+      client.walletCatalog.count.mockResolvedValue(0); // ninguém mais
+      await service.remove(USER, 'w1');
+      expect(client.walletCatalog.delete).toHaveBeenCalledWith({
+        where: { userId_walletId: { userId: USER, walletId: 'w1' } },
+      });
+      // 0 catalogadores → desativa a carteira compartilhada (cron para; dados ficam).
+      expect(client.wallet.update).toHaveBeenCalledWith({
+        where: { id: 'w1' },
+        data: { isActive: false },
+      });
+    });
+
+    it('NÃO desativa a carteira se ainda há outros catalogadores', async () => {
+      const { service, client } = makeService();
+      client.walletCatalog.findUnique.mockResolvedValue({ id: 'c1' });
+      client.walletCatalog.count.mockResolvedValue(2); // outros ainda acompanham
+      await service.remove(USER, 'w1');
       expect(client.wallet.update).not.toHaveBeenCalled();
-    });
-
-    it('remove exige ownership', async () => {
-      const { service, client } = makeService();
-      client.wallet.findFirst.mockResolvedValue(null);
-      await expect(service.remove(USER, 'w1')).rejects.toBeInstanceOf(NotFoundException);
-      expect(client.wallet.delete).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('requestResync', () => {
-    it('marca PENDING e limpa syncError quando é dono', async () => {
-      const { service, client } = makeService();
-      client.wallet.findFirst.mockResolvedValue({ id: 'w1' });
-      client.wallet.update.mockResolvedValue({ id: 'w1', syncStatus: SyncStatus.PENDING });
-      await service.requestResync(USER, 'w1');
-      expect(client.wallet.update.mock.calls[0][0].data).toEqual({
-        syncStatus: SyncStatus.PENDING,
-        syncError: null,
-      });
     });
   });
 
   describe('findAll', () => {
-    it('lista só as carteiras do usuário', async () => {
+    it('lista as carteiras catalogadas pelo usuário (via join)', async () => {
       const { service, client } = makeService();
-      client.wallet.findMany.mockResolvedValue([{ id: 'w1' }]);
+      client.walletCatalog.findMany.mockResolvedValue([entry()]);
       const res = await service.findAll(USER);
-      expect(client.wallet.findMany.mock.calls[0][0].where).toEqual({
+      expect(client.walletCatalog.findMany.mock.calls[0][0].where).toEqual({
         userId: USER,
-        kind: WalletKind.OWN,
       });
       expect(res).toHaveLength(1);
+      expect(res[0].id).toBe('w1');
     });
   });
 });

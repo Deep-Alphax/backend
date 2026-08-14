@@ -6,7 +6,7 @@ import {
   Logger,
   Optional,
 } from '@nestjs/common';
-import { Prisma, MetricPeriod, SyncStatus, WalletKind } from '@prisma/client';
+import { Prisma, MetricPeriod, SyncStatus, CatalogRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CandleService } from '../analytics/candle.service';
 import { CandlePoint } from '../analytics/profile-metrics.types';
@@ -31,7 +31,10 @@ const PERIOD_DAYS: Record<MetricPeriod, number> = {
   [MetricPeriod.M12]: 365,
 };
 
-/** Projeção pública de uma fonte (com suas carteiras). */
+/**
+ * Projeção de uma fonte com suas carteiras (via entradas de catálogo role=SOURCE).
+ * As carteiras são COMPARTILHADAS (canônicas); o vínculo com a fonte vive no catálogo.
+ */
 const SOURCE_SELECT = {
   id: true,
   name: true,
@@ -39,20 +42,51 @@ const SOURCE_SELECT = {
   attributionWindowHours: true,
   createdAt: true,
   updatedAt: true,
-  wallets: {
+  entries: {
+    where: { role: CatalogRole.SOURCE },
     select: {
-      id: true,
-      chain: true,
-      chainType: true,
-      address: true,
       label: true,
-      syncStatus: true,
-      lastSyncedAt: true,
-      firstTxAt: true,
+      wallet: {
+        select: {
+          id: true,
+          chain: true,
+          chainType: true,
+          address: true,
+          syncStatus: true,
+          lastSyncedAt: true,
+          firstTxAt: true,
+        },
+      },
     },
-    orderBy: { createdAt: 'asc' },
+    orderBy: { createdAt: 'asc' as const },
   },
 } satisfies Prisma.SourceSelect;
+
+type SourceWithEntries = Prisma.SourceGetPayload<{
+  select: typeof SOURCE_SELECT;
+}>;
+
+/** Achata as entradas de catálogo em `wallets` (mantém o shape público estável). */
+function mapSource(s: SourceWithEntries) {
+  return {
+    id: s.id,
+    name: s.name,
+    isActive: s.isActive,
+    attributionWindowHours: s.attributionWindowHours,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+    wallets: s.entries.map((e) => ({
+      id: e.wallet.id,
+      chain: e.wallet.chain,
+      chainType: e.wallet.chainType,
+      address: e.wallet.address,
+      label: e.label,
+      syncStatus: e.wallet.syncStatus,
+      lastSyncedAt: e.wallet.lastSyncedAt,
+      firstTxAt: e.wallet.firstTxAt,
+    })),
+  };
+}
 
 @Injectable()
 export class SourcesService {
@@ -83,7 +117,7 @@ export class SourcesService {
     }
 
     try {
-      return await write.source.create({
+      const created = await write.source.create({
         data: {
           userId,
           name: dto.name.trim(),
@@ -93,6 +127,7 @@ export class SourcesService {
         },
         select: SOURCE_SELECT,
       });
+      return mapSource(created);
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -104,12 +139,13 @@ export class SourcesService {
     }
   }
 
-  findAll(userId: string) {
-    return this.prisma.getReadClient().source.findMany({
+  async findAll(userId: string) {
+    const rows = await this.prisma.getReadClient().source.findMany({
       where: { userId },
       select: SOURCE_SELECT,
       orderBy: { createdAt: 'desc' },
     });
+    return rows.map(mapSource);
   }
 
   async findOne(userId: string, id: string) {
@@ -118,7 +154,7 @@ export class SourcesService {
       select: SOURCE_SELECT,
     });
     if (!source) throw new NotFoundException('Fonte não encontrada');
-    return source;
+    return mapSource(source);
   }
 
   async update(userId: string, id: string, dto: UpdateSourceDto) {
@@ -137,7 +173,7 @@ export class SourcesService {
       });
       // Mudança de janela/atividade/nome altera a atribuição → recomputa.
       await this.reattributeUser(userId);
-      return updated;
+      return mapSource(updated);
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -169,44 +205,68 @@ export class SourcesService {
     }
 
     const write = this.prisma.getWriteClient();
-    const count = await write.wallet.count({ where: { sourceId } });
+    const count = await write.walletCatalog.count({ where: { sourceId } });
     if (count >= SourcesService.MAX_WALLETS_PER_SOURCE) {
       throw new BadRequestException(
         `Limite de ${SourcesService.MAX_WALLETS_PER_SOURCE} carteiras por fonte atingido.`,
       );
     }
 
+    // Upsert da carteira CANÔNICA (compartilhada). O cron de ingestão a drena e sincroniza.
+    const wallet = await write.wallet.upsert({
+      where: {
+        chain_addressNorm: {
+          chain: dto.chain,
+          addressNorm: normalized.addressNorm,
+        },
+      },
+      create: {
+        chain: dto.chain,
+        chainType: normalized.chainType,
+        address: normalized.address,
+        addressNorm: normalized.addressNorm,
+        isActive: true,
+        syncStatus: SyncStatus.PENDING,
+      },
+      update: { isActive: true },
+      select: {
+        id: true,
+        chain: true,
+        chainType: true,
+        address: true,
+        syncStatus: true,
+      },
+    });
+
     try {
-      const wallet = await write.wallet.create({
+      const entry = await write.walletCatalog.create({
         data: {
           userId,
-          kind: WalletKind.SOURCE,
+          walletId: wallet.id,
+          role: CatalogRole.SOURCE,
           sourceId,
-          chain: dto.chain,
-          chainType: normalized.chainType,
-          address: normalized.address,
-          addressNorm: normalized.addressNorm,
           label: dto.label?.trim() || null,
-          syncStatus: SyncStatus.PENDING, // o cron de ingestão a drena e sincroniza
         },
-        select: {
-          id: true,
-          chain: true,
-          chainType: true,
-          address: true,
-          label: true,
-          syncStatus: true,
-        },
+        select: { label: true },
       });
-      return wallet;
+      // Nova carteira de fonte → recomputa a atribuição (novos leads possíveis).
+      await this.reattributeUser(userId);
+      return {
+        id: wallet.id,
+        chain: wallet.chain,
+        chainType: wallet.chainType,
+        address: wallet.address,
+        label: entry.label,
+        syncStatus: wallet.syncStatus,
+      };
     } catch (error) {
-      // Unique (userId, chain, addressNorm): a carteira já existe (própria ou de outra fonte).
+      // Unique (userId, walletId): a carteira já está no catálogo do usuário.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
         throw new ConflictException(
-          'Esta carteira já está cadastrada nesta rede.',
+          'Esta carteira já está no seu catálogo (como carteira ou fonte).',
         );
       }
       throw error;
@@ -216,14 +276,24 @@ export class SourcesService {
   async removeWallet(userId: string, sourceId: string, walletId: string) {
     await this.assertSourceOwnership(userId, sourceId);
     const write = this.prisma.getWriteClient();
-    const owned = await write.wallet.findFirst({
-      where: { id: walletId, sourceId, kind: WalletKind.SOURCE },
+    const entry = await write.walletCatalog.findFirst({
+      where: { userId, walletId, sourceId, role: CatalogRole.SOURCE },
       select: { id: true },
     });
-    if (!owned) throw new NotFoundException('Carteira da fonte não encontrada');
+    if (!entry) throw new NotFoundException('Carteira da fonte não encontrada');
 
-    // Cascade remove os trades da carteira; recomputa a atribuição sem esses leads.
-    await write.wallet.delete({ where: { id: walletId } });
+    // Remove só o vínculo (catálogo); a carteira/trades são compartilhados e ficam.
+    await write.walletCatalog.delete({
+      where: { userId_walletId: { userId, walletId } },
+    });
+    // Sem catalogadores → desativa a carteira (cron para), preservando os dados.
+    const remaining = await write.walletCatalog.count({ where: { walletId } });
+    if (remaining === 0) {
+      await write.wallet.update({
+        where: { id: walletId },
+        data: { isActive: false },
+      });
+    }
     await this.reattributeUser(userId);
     return { success: true, message: 'Carteira da fonte removida.' };
   }
@@ -252,26 +322,41 @@ export class SourcesService {
         .map((s) => [s.id, s.attributionWindowHours]),
     );
 
+    // Carteiras SOURCE deste usuário (o vínculo carteira→fonte vive no catálogo agora).
+    const sourceEntries = await read.walletCatalog.findMany({
+      where: {
+        userId,
+        role: CatalogRole.SOURCE,
+        sourceId: { in: allSourceIds },
+      },
+      select: { walletId: true, sourceId: true },
+    });
+    const sourceIdByWallet = new Map<string, string>(
+      sourceEntries
+        .filter((e) => e.sourceId != null)
+        .map((e) => [e.walletId, e.sourceId as string]),
+    );
+    const sourceWalletIds = [...sourceIdByWallet.keys()];
+
     const [leadRows, buyRows] = await Promise.all([
+      sourceWalletIds.length === 0
+        ? Promise.resolve([])
+        : read.trade.findMany({
+            where: { side: 'BUY', walletId: { in: sourceWalletIds } },
+            select: {
+              id: true,
+              baseMint: true,
+              blockTime: true,
+              walletId: true,
+              wallet: { select: { chain: true } },
+            },
+          }),
+      // Compras do usuário = carteiras RASTREADAS no catálogo (lag da atribuição).
       read.trade.findMany({
         where: {
           side: 'BUY',
-          wallet: {
-            userId,
-            kind: WalletKind.SOURCE,
-            sourceId: { in: allSourceIds },
-          },
+          wallet: { catalog: { some: { userId, role: CatalogRole.TRACKED } } },
         },
-        select: {
-          id: true,
-          baseMint: true,
-          blockTime: true,
-          walletId: true,
-          wallet: { select: { chain: true, sourceId: true } },
-        },
-      }),
-      read.trade.findMany({
-        where: { side: 'BUY', wallet: { userId, kind: WalletKind.OWN } },
         select: {
           id: true,
           baseMint: true,
@@ -281,16 +366,14 @@ export class SourcesService {
       }),
     ]);
 
-    const leadBuys: LeadBuy[] = leadRows
-      .filter((r) => r.wallet.sourceId != null)
-      .map((r) => ({
-        tradeId: r.id,
-        walletId: r.walletId,
-        sourceId: r.wallet.sourceId as string,
-        mint: r.baseMint,
-        chain: r.wallet.chain,
-        blockTimeMs: r.blockTime.getTime(),
-      }));
+    const leadBuys: LeadBuy[] = leadRows.map((r) => ({
+      tradeId: r.id,
+      walletId: r.walletId,
+      sourceId: sourceIdByWallet.get(r.walletId) as string,
+      mint: r.baseMint,
+      chain: r.wallet.chain,
+      blockTimeMs: r.blockTime.getTime(),
+    }));
     const userBuys: UserBuy[] = buyRows.map((r) => ({
       tradeId: r.id,
       mint: r.baseMint,
@@ -357,7 +440,9 @@ export class SourcesService {
     }
 
     const rows = await read.trade.findMany({
-      where: { wallet: { userId, kind: WalletKind.OWN } },
+      where: {
+        wallet: { catalog: { some: { userId, role: CatalogRole.TRACKED } } },
+      },
       select: {
         id: true,
         baseMint: true,
@@ -416,7 +501,9 @@ export class SourcesService {
     const read = this.prisma.getReadClient();
 
     const rows = await read.trade.findMany({
-      where: { wallet: { userId, kind: WalletKind.OWN } },
+      where: {
+        wallet: { catalog: { some: { userId, role: CatalogRole.TRACKED } } },
+      },
       select: {
         id: true,
         baseMint: true,

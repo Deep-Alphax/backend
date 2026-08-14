@@ -153,23 +153,34 @@ const SOL_STABLES = new Set<string>([
 export interface SolTradeInput {
   side: 'BUY' | 'SELL';
   blockTimeMs: number;
+  baseMint: string;
+  baseAmount: string;
   quoteMint: string;
   quoteAmount: string;
 }
 
 /**
- * "Capital medido em SOL" REAL: FLUXO LÍQUIDO de SOL do trading — Σ(SOL recebido nas
- * vendas) − Σ(SOL gasto nas compras), acumulado por dia dentro da janela. Reflete
- * quantos SOL o trading de fato colocou/tirou da carteira.
+ * "Capital medido em SOL" REAL: PnL REALIZADO em SOL do trading, acumulado por dia
+ * dentro da janela. É a MESMA filosofia da curva de capital em USD (PnL realizado
+ * casado por FIFO), só que denominada em SOL — para as duas linhas do gráfico serem
+ * comparáveis.
  *
- * Por que fluxo líquido e não FIFO casado: o histórico sincronizado não vai até a
- * primeira compra, então muitas vendas são de posições anteriores aos dados (parecem
- * "windfall" mas são trades reais). O FIFO descartaria essas vendas e subestimaria o
- * total em ordens de magnitude. O fluxo líquido conta todas as pernas de SOL de fato
- * movimentadas — bate com o SOL que o trader vê na carteira.
+ * Por dia (só vendas dentro da janela contribuem):
+ *   - COMPRA: empilha um lote FIFO {qty, custoSol} e contribui 0 (deploy de capital
+ *     NÃO é prejuízo — foi o que antes fazia a linha mergulhar no negativo no 1º dia).
+ *   - VENDA: casa por FIFO contra os lotes. Contribui `proceedsSol − custoSol_casado`.
+ *     A parte SEM lote (posição comprada antes do histórico sincronizado — "windfall",
+ *     mas trade real) entra com custo 0, i.e. proceeds cheio; assim não se joga fora o
+ *     SOL de fato recebido. Resultado por venda = `proceedsSol − custoCasado`.
+ *
+ * Só uma perda REAL de SOL num round-trip (vendeu por menos SOL do que comprou) faz a
+ * curva descer — o que é verdade e legítimo. O total acumulado equivale ao fluxo
+ * líquido de SOL quando não há posição aberta ao fim da janela; havendo, a posição
+ * ainda em carteira conta como 0 (holding ≠ prejuízo), não como SOL "gasto".
  *
  * Perna em SOL (WSOL) = valor direto; perna em stablecoin = convertida ao preço do
- * SOL no dia; quote desconhecida = 0 (não distorce). Janela filtra por blockTime.
+ * SOL no dia; quote desconhecida = 0 (não distorce). Lotes são construídos com TODOS
+ * os trades (a base de custo pode ser anterior à janela); só vendas na janela somam.
  */
 export function computeSolBenchmark(
   trades: SolTradeInput[],
@@ -195,16 +206,52 @@ export function computeSolBenchmark(
     return 0; // quote desconhecida → não distorce
   };
 
-  // Fluxo líquido por dia: venda soma o SOL recebido, compra subtrai o SOL gasto.
+  // FIFO em SOL por token. Lote = {qty, solCost}. Constrói com TODOS os trades em ordem
+  // cronológica (a base de custo pode ser anterior à janela e vendas pré-janela também
+  // consomem lotes); realiza — soma no dia — só as vendas DENTRO da janela.
+  const lots = new Map<string, Array<{ qty: number; solCost: number }>>();
   const dailySol = new Map<string, number>();
   for (const t of trades) {
+    // Só pernas em SOL (WSOL) ou stablecoin participam. Quote desconhecida é ignorada
+    // por completo (nem empilha lote, nem casa/realiza) — senão uma venda de quote
+    // desconhecida realizaria `0 − custo` = perda espúria.
+    if (t.quoteMint !== WSOL && !SOL_STABLES.has(t.quoteMint)) continue;
+
+    const date = dateOf(t.blockTimeMs);
+    const qty = Number(t.baseAmount) || 0;
+    const sol = solOfLeg(t.quoteMint, t.quoteAmount, date);
+
+    let lot = lots.get(t.baseMint);
+    if (!lot) {
+      lot = [];
+      lots.set(t.baseMint, lot);
+    }
+
+    if (t.side === 'BUY') {
+      if (qty > 0) lot.push({ qty, solCost: sol });
+      continue;
+    }
+
+    // SELL — casa por FIFO consumindo os lotes (mesmo fora da janela, p/ não recasar).
+    let remaining = qty;
+    let matchedCost = 0;
+    while (remaining > 1e-12 && lot.length > 0) {
+      const l = lot[0];
+      const take = Math.min(remaining, l.qty);
+      const frac = l.qty > 0 ? take / l.qty : 0;
+      matchedCost += l.solCost * frac;
+      l.solCost -= l.solCost * frac;
+      l.qty -= take;
+      remaining -= take;
+      if (l.qty <= 1e-12) lot.shift();
+    }
+
     const inWindow = windowStartMs == null || t.blockTimeMs >= windowStartMs;
     if (!inWindow) continue;
-    const date = dateOf(t.blockTimeMs);
-    const sol = solOfLeg(t.quoteMint, t.quoteAmount, date);
-    if (sol === 0) continue;
-    const delta = t.side === 'SELL' ? sol : -sol;
-    dailySol.set(date, (dailySol.get(date) ?? 0) + delta);
+    // Realizado = proceeds cheio − custo casado. A parte sem lote (windfall) já entra
+    // por diferença: proceeds cobre 100% da qty vendida, custo cobre só o que casou.
+    const realized = sol - matchedCost;
+    dailySol.set(date, (dailySol.get(date) ?? 0) + realized);
   }
 
   let cum = 0;

@@ -6,20 +6,28 @@ const USER = 'user-1';
 
 function makeService() {
   const client = {
-    wallet: { findFirst: jest.fn(), findMany: jest.fn() },
+    // Acesso agora é via catálogo (não mais wallet.userId/kind).
+    walletCatalog: { findUnique: jest.fn(), findMany: jest.fn() },
     trade: { aggregate: jest.fn(), findMany: jest.fn() },
-    metricSnapshot: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
+    metricSnapshot: {
+      findFirst: jest.fn(),
+      update: jest.fn(),
+      create: jest.fn(),
+    },
   };
-  const prisma: any = { getReadClient: () => client, getWriteClient: () => client };
+  const prisma: any = {
+    getReadClient: () => client,
+    getWriteClient: () => client,
+  };
   return { service: new AnalyticsService(prisma), client };
 }
 
 const dec = (s: string) => ({ toString: () => s }); // stub de Prisma.Decimal
 
 describe('AnalyticsService', () => {
-  it('walletMetrics lança NotFound quando a carteira não é do usuário', async () => {
+  it('walletMetrics lança NotFound quando a carteira não está no catálogo do usuário', async () => {
     const { service, client } = makeService();
-    client.wallet.findFirst.mockResolvedValue(null);
+    client.walletCatalog.findUnique.mockResolvedValue(null);
     await expect(
       service.walletMetrics(USER, 'w1', MetricPeriod.D30, 0),
     ).rejects.toBeInstanceOf(NotFoundException);
@@ -27,7 +35,7 @@ describe('AnalyticsService', () => {
 
   it('portfolio sem carteiras devolve resultado vazio sem tocar o cache', async () => {
     const { service, client } = makeService();
-    client.wallet.findMany.mockResolvedValue([]);
+    client.walletCatalog.findMany.mockResolvedValue([]);
     const res = await service.portfolioMetrics(USER, MetricPeriod.D30, 0);
     expect(res.totalTrades).toBe(0);
     expect(client.metricSnapshot.findFirst).not.toHaveBeenCalled();
@@ -35,24 +43,39 @@ describe('AnalyticsService', () => {
 
   it('retorna o snapshot cacheado quando o tradesHash bate', async () => {
     const { service, client } = makeService();
-    client.wallet.findFirst.mockResolvedValue({ id: 'w1' });
-    client.trade.aggregate.mockResolvedValue({ _count: { _all: 3 }, _max: { createdAt: new Date(1000) } });
+    client.walletCatalog.findUnique.mockResolvedValue({ id: 'c1' });
+    client.trade.aggregate.mockResolvedValue({
+      _count: { _all: 3 },
+      _max: { createdAt: new Date(1000) },
+    });
     client.metricSnapshot.findFirst.mockResolvedValue({
       id: 's1',
       tradesHash: `v4:3:1000:0`,
       data: { totalTrades: 3, cached: true },
     });
 
-    const res: any = await service.walletMetrics(USER, 'w1', MetricPeriod.D30, 0);
+    const res: any = await service.walletMetrics(
+      USER,
+      'w1',
+      MetricPeriod.D30,
+      0,
+    );
     expect(res.cached).toBe(true);
     expect(client.trade.findMany).not.toHaveBeenCalled(); // não recomputou
   });
 
   it('recomputa e faz UPDATE quando o hash mudou', async () => {
     const { service, client } = makeService();
-    client.wallet.findFirst.mockResolvedValue({ id: 'w1' });
-    client.trade.aggregate.mockResolvedValue({ _count: { _all: 1 }, _max: { createdAt: new Date(2000) } });
-    client.metricSnapshot.findFirst.mockResolvedValue({ id: 's1', tradesHash: 'stale', data: {} });
+    client.walletCatalog.findUnique.mockResolvedValue({ id: 'c1' });
+    client.trade.aggregate.mockResolvedValue({
+      _count: { _all: 1 },
+      _max: { createdAt: new Date(2000) },
+    });
+    client.metricSnapshot.findFirst.mockResolvedValue({
+      id: 's1',
+      tradesHash: 'stale',
+      data: {},
+    });
     client.trade.findMany.mockResolvedValue([
       {
         blockTime: new Date('2026-07-20T10:00:00Z'),
@@ -77,8 +100,11 @@ describe('AnalyticsService', () => {
 
   it('cria snapshot novo quando não havia cache (scope WALLET)', async () => {
     const { service, client } = makeService();
-    client.wallet.findFirst.mockResolvedValue({ id: 'w1' });
-    client.trade.aggregate.mockResolvedValue({ _count: { _all: 0 }, _max: { createdAt: null } });
+    client.walletCatalog.findUnique.mockResolvedValue({ id: 'c1' });
+    client.trade.aggregate.mockResolvedValue({
+      _count: { _all: 0 },
+      _max: { createdAt: null },
+    });
     client.metricSnapshot.findFirst.mockResolvedValue(null);
     client.trade.findMany.mockResolvedValue([]);
 

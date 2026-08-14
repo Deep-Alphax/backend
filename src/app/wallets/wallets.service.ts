@@ -1,99 +1,88 @@
 import {
   Injectable,
   BadRequestException,
-  ConflictException,
   NotFoundException,
-  UnauthorizedException,
   Logger,
-  Inject,
 } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
-import { randomBytes } from 'crypto';
-import { Prisma, SyncStatus, WalletKind, Wallet } from '@prisma/client';
+import { Prisma, SyncStatus, CatalogRole } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WalletSyncService } from '../analytics/ingestion/wallet-sync.service';
-import { CreateWalletDto, UpdateWalletDto, RequestWalletNonceDto } from './dto/wallet.dto';
+import { CatalogWalletDto, UpdateWalletDto } from './dto/wallet.dto';
 import { normalizeWalletAddress } from './wallet-address.util';
-import { buildVerificationMessage, verifyWalletSignature } from './wallet-signature.util';
 
-/** Projeção pública de uma carteira (esconde cursor/erro internos de sync). */
+/** Projeção pública da carteira canônica (esconde cursor/erro internos de sync). */
 const WALLET_SELECT = {
   id: true,
   chain: true,
   chainType: true,
   address: true,
-  label: true,
   isActive: true,
   syncStatus: true,
   lastSyncedAt: true,
   firstTxAt: true,
+} satisfies Prisma.WalletSelect;
+
+/** Entrada de catálogo + carteira, projetada para o formato público. */
+const CATALOG_SELECT = {
+  role: true,
+  label: true,
   createdAt: true,
   updatedAt: true,
-} satisfies Prisma.WalletSelect;
+  wallet: { select: WALLET_SELECT },
+} satisfies Prisma.WalletCatalogSelect;
 
 @Injectable()
 export class WalletsService {
   private readonly logger = new Logger(WalletsService.name);
 
-  /** Teto de carteiras por usuário — barra abuso/enumeração e limita custo de sync. */
+  /** Teto de carteiras catalogadas por usuário — barra abuso/enumeração. */
   private static readonly MAX_WALLETS_PER_USER = 50;
-  /** Validade do nonce de verificação (assinatura precisa chegar nessa janela). */
-  private static readonly NONCE_TTL_MS = 5 * 60 * 1000;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly walletSync: WalletSyncService,
-    @Inject(CACHE_MANAGER) private readonly cache: Cache,
   ) {}
 
-  /** Chave de cache do nonce/mensagem de verificação (por usuário/chain/endereço). */
-  private nonceKey(userId: string, chain: string, addressNorm: string): string {
-    return `wallet_verify:${userId}:${chain}:${addressNorm}`;
-  }
-
-  /**
-   * Passo 1 da verificação por assinatura: gera a mensagem (com nonce único) que o
-   * usuário vai assinar para provar posse. A mensagem é CONTROLADA pelo servidor
-   * (anti-tamper) e guardada em cache (single-use, TTL curto).
-   */
-  async requestVerificationNonce(userId: string, dto: RequestWalletNonceDto) {
-    let normalized;
-    try {
-      normalized = normalizeWalletAddress(dto.chain, dto.address);
-    } catch (err) {
-      throw new BadRequestException((err as Error).message);
-    }
-
-    const nonce = randomBytes(16).toString('hex');
-    const message = buildVerificationMessage(normalized.address, nonce);
-    await this.cache.set(
-      this.nonceKey(userId, dto.chain, normalized.addressNorm),
-      message,
-      WalletsService.NONCE_TTL_MS,
-    );
-    return { message };
-  }
-
-  /** Projeta a carteira completa no formato público (esconde cursor/erro de sync). */
-  private toPublicWallet(w: Wallet) {
+  /** Achata a entrada de catálogo + carteira canônica no formato público. */
+  private toPublic(entry: {
+    role: CatalogRole;
+    label: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    wallet: {
+      id: string;
+      chain: string;
+      chainType: string;
+      address: string;
+      isActive: boolean;
+      syncStatus: SyncStatus;
+      lastSyncedAt: Date | null;
+      firstTxAt: Date | null;
+    };
+  }) {
     return {
-      id: w.id,
-      chain: w.chain,
-      chainType: w.chainType,
-      address: w.address,
-      label: w.label,
-      isActive: w.isActive,
-      syncStatus: w.syncStatus,
-      lastSyncedAt: w.lastSyncedAt,
-      firstTxAt: w.firstTxAt,
-      createdAt: w.createdAt,
-      updatedAt: w.updatedAt,
+      id: entry.wallet.id,
+      chain: entry.wallet.chain,
+      chainType: entry.wallet.chainType,
+      address: entry.wallet.address,
+      label: entry.label, // rótulo é POR USUÁRIO (vive no catálogo)
+      role: entry.role,
+      isActive: entry.wallet.isActive,
+      syncStatus: entry.wallet.syncStatus,
+      lastSyncedAt: entry.wallet.lastSyncedAt,
+      firstTxAt: entry.wallet.firstTxAt,
+      createdAt: entry.createdAt, // quando o usuário catalogou
+      updatedAt: entry.updatedAt,
     };
   }
 
-  async create(userId: string, dto: CreateWalletDto) {
-    // Validação/normalização determinística por chain (checksum EVM / base58 Solana).
+  /**
+   * Busca/cataloga uma carteira na conta do usuário. SEM assinatura/posse: catalogar
+   * é só um bookmark de um endereço público. Os dados on-chain são COMPARTILHADOS —
+   * um único registro canônico por (chain, addressNorm), reusado por todos. Se a
+   * carteira nunca foi sincronizada, ou está stale, dispara o sync (preenche a lacuna).
+   */
+  async catalogWallet(userId: string, dto: CatalogWalletDto) {
     let normalized;
     try {
       normalized = normalizeWalletAddress(dto.chain, dto.address);
@@ -101,152 +90,150 @@ export class WalletsService {
       throw new BadRequestException((err as Error).message);
     }
 
-    // Prova de posse: só cadastra se a assinatura bater com o nonce emitido
-    // (server-controlled, single-use). Sem isso, qualquer um cadastraria endereço alheio.
-    const nonceKey = this.nonceKey(userId, dto.chain, normalized.addressNorm);
-    const message = await this.cache.get<string>(nonceKey);
-    if (!message) {
-      throw new BadRequestException('Verificação expirada. Conecte a carteira novamente.');
-    }
-    if (!verifyWalletSignature(normalized.chainType, normalized.address, message, dto.signature)) {
-      throw new UnauthorizedException(
-        'Assinatura inválida — não foi possível confirmar a posse da carteira.',
-      );
-    }
-    await this.cache.del(nonceKey); // single-use
-
     const write = this.prisma.getWriteClient();
+    const role = dto.role ?? CatalogRole.TRACKED;
 
-    // Idempotência: reconectar uma carteira JÁ cadastrada não é erro (o front
-    // re-dispara o registro a cada refresh, pois a carteira segue conectada).
-    // Devolve a existente em vez de estourar 409, e re-dispara o sync só se ela
-    // estava em ERROR (destrava) — sem re-sincronizar à toa nos casos normais.
-    const existing = await write.wallet.findFirst({
-      where: { userId, chain: dto.chain, addressNorm: normalized.addressNorm },
+    // Já catalogada? Re-buscar a mesma carteira é idempotente e não conta no cap.
+    const existing = await write.walletCatalog.findFirst({
+      where: {
+        userId,
+        wallet: { chain: dto.chain, addressNorm: normalized.addressNorm },
+      },
+      select: { id: true },
     });
-    if (existing) {
-      if (existing.kind !== WalletKind.OWN) {
-        throw new ConflictException('Este endereço já está cadastrado como fonte.');
+
+    if (!existing) {
+      const count = await write.walletCatalog.count({ where: { userId } });
+      if (count >= WalletsService.MAX_WALLETS_PER_USER) {
+        throw new BadRequestException(
+          `Limite de ${WalletsService.MAX_WALLETS_PER_USER} carteiras por conta atingido.`,
+        );
       }
-      if (existing.syncStatus === SyncStatus.ERROR) {
-        void this.walletSync
-          .syncWallet(existing)
-          .catch((e) =>
-            this.logger.warn(`Re-sync (destravar) falhou p/ wallet ${existing.id}: ${e?.message}`),
-          );
-      }
-      return this.toPublicWallet(existing);
     }
 
-    // Cap por usuário (só carteiras OWN — carteiras de fonte não contam no limite).
-    const count = await write.wallet.count({
-      where: { userId, kind: WalletKind.OWN },
-    });
-    if (count >= WalletsService.MAX_WALLETS_PER_USER) {
-      throw new BadRequestException(
-        `Limite de ${WalletsService.MAX_WALLETS_PER_USER} carteiras por conta atingido.`,
-      );
-    }
-
-    try {
-      const wallet = await write.wallet.create({
-        data: {
-          userId,
+    // Upsert da carteira CANÔNICA (compartilhada) por (chain, addressNorm).
+    const wallet = await write.wallet.upsert({
+      where: {
+        chain_addressNorm: {
           chain: dto.chain,
-          chainType: normalized.chainType,
-          address: normalized.address,
           addressNorm: normalized.addressNorm,
-          label: dto.label?.trim() || null,
-          syncStatus: SyncStatus.PENDING,
         },
-      });
+      },
+      create: {
+        chain: dto.chain,
+        chainType: normalized.chainType,
+        address: normalized.address,
+        addressNorm: normalized.addressNorm,
+        isActive: true,
+        syncStatus: SyncStatus.PENDING,
+      },
+      // Recataloga uma carteira antes desativada (0 catalogadores) → reativa o sync.
+      update: { isActive: true },
+      select: { id: true },
+    });
 
-      // Ingestão IMEDIATA (não espera o tick do cron, que pode levar até 1 min).
-      // Fire-and-forget: a resposta volta já; a sincronização roda em background,
-      // emite `wallet.synced` ao inserir trades (invalida os snapshots) e o
-      // frontend faz polling do dashboard até os dados aparecerem.
-      void this.walletSync
-        .syncWallet(wallet)
-        .catch((e) =>
-          this.logger.warn(`Sync imediato falhou p/ wallet ${wallet.id}: ${e?.message}`),
-        );
+    // Cria/atualiza a entrada de catálogo do usuário.
+    const entry = await write.walletCatalog.upsert({
+      where: { userId_walletId: { userId, walletId: wallet.id } },
+      create: {
+        userId,
+        walletId: wallet.id,
+        role,
+        label: dto.label?.trim() || null,
+      },
+      update: {
+        ...(dto.label !== undefined ? { label: dto.label.trim() || null } : {}),
+      },
+      select: CATALOG_SELECT,
+    });
 
-      return this.toPublicWallet(wallet);
-    } catch (error) {
-      // Unique (userId, chain, addressNorm): a carteira já existe nessa chain.
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        throw new ConflictException(
-          'Esta carteira já está cadastrada nesta rede.',
-        );
-      }
-      throw error;
-    }
+    // Preenche a lacuna (ou faz o backfill inicial) em background — não bloqueia a resposta.
+    void this.walletSync.ensureFresh(wallet.id);
+
+    return this.toPublic(entry);
   }
 
-  findAll(userId: string) {
-    return this.prisma.getReadClient().wallet.findMany({
-      where: { userId, kind: WalletKind.OWN }, // só carteiras do usuário (não fontes)
-      select: WALLET_SELECT,
+  async findAll(userId: string) {
+    const entries = await this.prisma.getReadClient().walletCatalog.findMany({
+      where: { userId },
+      select: CATALOG_SELECT,
       orderBy: { createdAt: 'desc' },
     });
+    return entries.map((e) => this.toPublic(e));
   }
 
-  async findOne(userId: string, id: string) {
-    const wallet = await this.prisma.getReadClient().wallet.findFirst({
-      where: { id, userId, kind: WalletKind.OWN }, // ownership: só a própria carteira
-      select: WALLET_SELECT,
+  async findOne(userId: string, walletId: string) {
+    const entry = await this.prisma.getReadClient().walletCatalog.findUnique({
+      where: { userId_walletId: { userId, walletId } },
+      select: CATALOG_SELECT,
     });
-    if (!wallet) throw new NotFoundException('Carteira não encontrada');
-    return wallet;
+    if (!entry) throw new NotFoundException('Carteira não encontrada');
+    return this.toPublic(entry);
   }
 
-  async update(userId: string, id: string, dto: UpdateWalletDto) {
-    await this.assertOwnership(userId, id);
-    return this.prisma.getWriteClient().wallet.update({
-      where: { id },
+  async update(userId: string, walletId: string, dto: UpdateWalletDto) {
+    await this.assertCataloged(userId, walletId);
+    // isActive é da carteira COMPARTILHADA — não deixamos um usuário desativá-la p/ os
+    // outros. Aqui só o rótulo POR USUÁRIO (catálogo).
+    const entry = await this.prisma.getWriteClient().walletCatalog.update({
+      where: { userId_walletId: { userId, walletId } },
       data: {
         ...(dto.label !== undefined ? { label: dto.label.trim() || null } : {}),
-        ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
       },
-      select: WALLET_SELECT,
+      select: CATALOG_SELECT,
     });
-  }
-
-  async remove(userId: string, id: string) {
-    await this.assertOwnership(userId, id);
-    // Cascade (schema) remove trades/positions/snapshots vinculados.
-    await this.prisma.getWriteClient().wallet.delete({ where: { id } });
-    return { success: true, message: 'Carteira removida.' };
+    return this.toPublic(entry);
   }
 
   /**
-   * Reagenda a sincronização da carteira (marca PENDING). O worker de ingestão
-   * (Fase 5) consome carteiras PENDING. Idempotente enquanto já estiver na fila.
+   * Remove a carteira do catálogo do usuário. NÃO apaga a carteira/trades compartilhados
+   * (outros usuários podem catalogá-la). Se sobrar 0 catalogadores, desativa a carteira
+   * (o cron para de sincronizá-la), preservando os dados p/ reuso futuro.
    */
-  async requestResync(userId: string, id: string) {
-    await this.assertOwnership(userId, id);
-    return this.prisma.getWriteClient().wallet.update({
-      where: { id },
-      // Resync manual zera o orçamento de retry (backoff) — "tentar de novo" de verdade.
+  async remove(userId: string, walletId: string) {
+    await this.assertCataloged(userId, walletId);
+    const write = this.prisma.getWriteClient();
+    await write.walletCatalog.delete({
+      where: { userId_walletId: { userId, walletId } },
+    });
+    const remaining = await write.walletCatalog.count({ where: { walletId } });
+    if (remaining === 0) {
+      await write.wallet.update({
+        where: { id: walletId },
+        data: { isActive: false },
+      });
+    }
+    return { success: true, message: 'Carteira removida do seu catálogo.' };
+  }
+
+  /**
+   * Reagenda a sincronização da carteira (marca PENDING). Como é compartilhada, o
+   * resync beneficia todos os catalogadores. Zera o orçamento de retry (backoff).
+   */
+  async requestResync(userId: string, walletId: string) {
+    await this.assertCataloged(userId, walletId);
+    await this.prisma.getWriteClient().wallet.update({
+      where: { id: walletId },
       data: {
         syncStatus: SyncStatus.PENDING,
         syncError: null,
         syncAttempts: 0,
         nextRetryAt: null,
+        isActive: true,
       },
-      select: WALLET_SELECT,
     });
+    return this.findOne(userId, walletId);
   }
 
-  /** Garante que a carteira existe E pertence ao usuário (evita IDOR). */
-  private async assertOwnership(userId: string, id: string): Promise<void> {
-    const owned = await this.prisma.getReadClient().wallet.findFirst({
-      where: { id, userId, kind: WalletKind.OWN },
+  /** Garante que o usuário CATALOGA a carteira (evita IDOR sobre dados de outro). */
+  private async assertCataloged(
+    userId: string,
+    walletId: string,
+  ): Promise<void> {
+    const entry = await this.prisma.getReadClient().walletCatalog.findUnique({
+      where: { userId_walletId: { userId, walletId } },
       select: { id: true },
     });
-    if (!owned) throw new NotFoundException('Carteira não encontrada');
+    if (!entry) throw new NotFoundException('Carteira não encontrada');
   }
 }

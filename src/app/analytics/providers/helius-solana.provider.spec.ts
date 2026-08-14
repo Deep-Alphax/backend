@@ -170,6 +170,41 @@ describe('HeliusSolanaProvider', () => {
     expect(Number(s.quoteAmount)).toBeCloseTo(9.9, 9); // 10 − 0,1 de taxa
   });
 
+  it('REGRESSÃO: venda paga em SOL NATIVO (pump.fun) usa accountData.nativeBalanceChange', async () => {
+    // Bug real: proventos em SOL nativo NÃO aparecem como nativeTransfer (só como
+    // balance change). Somar transfers pegava só as taxas (saídas) → venda ~0
+    // (prejuízo fantasma). Deve usar o Δnative do accountData = +0,334.
+    const pumpSell = {
+      signature: 'sigPump',
+      timestamp: secs('2026-08-11T04:00:00Z'),
+      feePayer: A,
+      fee: 105000,
+      source: 'PUMP_FUN',
+      tokenTransfers: [
+        {
+          fromUserAccount: A,
+          toUserAccount: 'P',
+          mint: MANLET,
+          tokenAmount: 4856394,
+        },
+        // SEM perna WSOL: o pool paga em SOL nativo.
+      ],
+      nativeTransfers: [
+        { fromUserAccount: A, toUserAccount: 'TIP', amount: 0.0034e9 }, // só saídas de taxa
+        { fromUserAccount: A, toUserAccount: 'FEE', amount: 0.001e9 },
+      ],
+      // Proventos reais SÓ aparecem aqui (mudança líquida de saldo).
+      accountData: [{ account: A, nativeBalanceChange: 0.334653e9 }],
+    };
+    const { provider } = makeProvider([pumpSell]);
+    const res = await provider.fetchSwaps({ chain: Chain.SOLANA, address: A });
+    const s = res.swaps[0];
+    expect(s.side).toBe(TradeSide.SELL);
+    expect(s.quoteMint).toBe(WSOL);
+    // Antes do fix: ~0,0044 (só taxas). Depois: 0,334653 (Δnative real).
+    expect(Number(s.quoteAmount)).toBeCloseTo(0.334653, 6);
+  });
+
   it('fetchTokenSnapshots via DexScreener: par de maior liquidez; mint sem par → null', async () => {
     // MANLET tem 2 pares (fica com o de maior liquidez); DEAD não tem par → null.
     const DEAD = 'DEADmint111111111111111111111111111111111111';

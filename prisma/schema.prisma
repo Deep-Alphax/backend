@@ -65,6 +65,7 @@ model User {
   wallets   Wallet[]
   snapshots MetricSnapshot[]
   sources   Source[]
+  catalog   WalletCatalog[]
 
   @@index([googleId])
   @@index([deletedAt])
@@ -110,12 +111,15 @@ enum WalletKind {
 }
 
 model Wallet {
-  id     String @id @default(cuid())
-  userId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id String @id @default(cuid())
 
-  // Papel da carteira. Carteiras SOURCE pertencem a uma `Source` (sourceId) e são
-  // filtradas fora de toda leitura de métricas do usuário (só alimentam atribuição).
+  // DEPRECATED (fase expand): a carteira agora é COMPARTILHADA (canônica por
+  // chain+addressNorm) e a relação usuário↔carteira vive em WalletCatalog. Estes
+  // campos seguem opcionais só durante a transição e serão dropados na fase contract.
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // DEPRECATED (fase expand): papel agora vive em WalletCatalog.role. Ver acima.
   kind     WalletKind @default(OWN)
   sourceId String?
   source   Source?    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
@@ -149,15 +153,53 @@ model Wallet {
   trades    Trade[]
   positions TokenPosition[]
   snapshots MetricSnapshot[]
+  catalog   WalletCatalog[]
 
-  // Uma mesma carteira (endereço) só pode ser cadastrada uma vez por usuário POR
-  // CHAIN. O mesmo endereço 0x no Ethereum e no Base são carteiras distintas
-  // (atividades on-chain independentes), então a unique é por `chain`, não `chainType`.
-  @@unique([userId, chain, addressNorm])
+  // Carteira CANÔNICA/compartilhada: um único registro por (chain, addressNorm),
+  // reusado por todos que a catalogam. O mesmo endereço 0x no Ethereum e no Base são
+  // carteiras distintas (atividades on-chain independentes), então a unique é por
+  // `chain`, não `chainType`.
+  @@unique([chain, addressNorm])
   @@index([userId])
   @@index([syncStatus])
   // Cobre a varredura do cron por carteiras em ERROR prontas p/ retry (syncStatus+nextRetryAt).
   @@index([syncStatus, nextRetryAt])
+  @@index([sourceId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Catálogo: liga um usuário a uma carteira (compartilhada) que ele acompanha.
+// NÃO implica posse — é um bookmark/lookup. Os dados on-chain (trades) são únicos
+// por carteira canônica e reusados por todos que a catalogam.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Papel da carteira NA PERSPECTIVA do usuário (substitui WalletKind, que vivia na
+// Wallet e não permitia "OWN pra mim, SOURCE pra outro").
+enum CatalogRole {
+  TRACKED // carteira que o usuário acompanha (alimenta o dashboard dela)
+  SOURCE // fonte de alpha (lead da atribuição lead-lag)
+}
+
+model WalletCatalog {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  walletId String
+  wallet   Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  role  CatalogRole @default(TRACKED)
+  label String?
+
+  // Fontes SOURCE podem pertencer a um grupo nomeado (Source). null p/ TRACKED.
+  sourceId String?
+  source   Source? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, walletId])
+  @@index([userId])
+  @@index([walletId])
   @@index([sourceId])
 }
 
@@ -239,6 +281,7 @@ model Source {
 
   wallets      Wallet[]
   attributions TradeAttribution[]
+  entries      WalletCatalog[]
 
   // O nome é único por usuário (catálogo pessoal de fontes).
   @@unique([userId, name])

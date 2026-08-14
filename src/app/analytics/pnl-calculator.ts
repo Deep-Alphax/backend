@@ -15,7 +15,7 @@ import {
   CapitalCurve,
   BankrollMetrics,
 } from './pnl-types';
-import { ClosedPosition } from './profile-metrics.types';
+import { ClosedPosition, OpenPosition } from './profile-metrics.types';
 
 /** Uma posição fechada (venda casada com lotes reais), dentro da janela. */
 interface ClosedSell {
@@ -113,7 +113,9 @@ function matchSell(
   while (remaining.gt(0) && st.lots.length > 0) {
     const lot = st.lots[0];
     const take = Prisma.Decimal.min(remaining, lot.qty);
-    matchedRealized = matchedRealized.plus(sellPrice.minus(lot.unitCost).times(take));
+    matchedRealized = matchedRealized.plus(
+      sellPrice.minus(lot.unitCost).times(take),
+    );
     costBasisUsd = costBasisUsd.plus(lot.unitCost.times(take));
     const takeNum = Number(take.toString());
     const holdSec = Math.max(0, (sellTimeMs - lot.time) / 1000);
@@ -131,7 +133,14 @@ function matchSell(
     zeroBasisProceeds = sellPrice.times(remaining);
     unmatched = true;
   }
-  return { matchedRealized, zeroBasisProceeds, matchedQty, costBasisUsd, holdWeight, unmatched };
+  return {
+    matchedRealized,
+    zeroBasisProceeds,
+    matchedQty,
+    costBasisUsd,
+    holdWeight,
+    unmatched,
+  };
 }
 
 /** Classifica uma posição fechada pelo múltiplo realizado (ver OutcomeKey). */
@@ -151,12 +160,18 @@ function outcomeOf(multiple: number): OutcomeKey {
 export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
   const tz = opts.tzOffsetMinutes ?? 0;
   const windowStart = opts.windowStart;
-  const inWindow = (t: TradeInput) => !windowStart || t.blockTime >= windowStart;
+  const inWindow = (t: TradeInput) =>
+    !windowStart || t.blockTime >= windowStart;
 
-  const sorted = [...trades].sort((a, b) => a.blockTime.getTime() - b.blockTime.getTime());
+  const sorted = [...trades].sort(
+    (a, b) => a.blockTime.getTime() - b.blockTime.getTime(),
+  );
 
   const tokens = new Map<string, TokenState>();
-  const hourly = Array.from({ length: 24 }, () => ({ trades: 0, realized: new D(0) }));
+  const hourly = Array.from({ length: 24 }, () => ({
+    trades: 0,
+    realized: new D(0),
+  }));
   const days = new Map<string, { trades: number; realized: Dec }>();
   // Grade 7 dias × 6 blocos de 4h (heatmap "Quando e onde").
   const weekGrid = Array.from({ length: 7 }, () =>
@@ -270,7 +285,8 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
     realizedTotal = realizedTotal.plus(realizedThis);
 
     // Capital líquido em risco: compra soma o notional, venda subtrai; o pico é o bankroll.
-    deployedNet = t.side === TradeSide.BUY ? deployedNet.plus(usd) : deployedNet.minus(usd);
+    deployedNet =
+      t.side === TradeSide.BUY ? deployedNet.plus(usd) : deployedNet.minus(usd);
     if (deployedNet.gt(peakDeployed)) peakDeployed = deployedNet;
 
     const { hour, date, weekday } = localParts(t.blockTime, tz);
@@ -308,7 +324,8 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
       realizedPnlUsd: s.realized.toFixed(2),
       windfallUsd: s.windfall.toFixed(2),
       feesUsd: s.fees.toFixed(2),
-      avgHoldSeconds: s.holdQtySum > 0 ? Math.round(s.holdWeightSum / s.holdQtySum) : null,
+      avgHoldSeconds:
+        s.holdQtySum > 0 ? Math.round(s.holdWeightSum / s.holdQtySum) : null,
     }))
     .sort((a, b) => Number(b.realizedPnlUsd) - Number(a.realizedPnlUsd));
 
@@ -319,7 +336,11 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
   }));
 
   const dailyOut: DayBucket[] = [...days.entries()]
-    .map(([date, d]) => ({ date, trades: d.trades, realizedPnlUsd: d.realized.toFixed(2) }))
+    .map(([date, d]) => ({
+      date,
+      trades: d.trades,
+      realizedPnlUsd: d.realized.toFixed(2),
+    }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
 
   const weekdayBlocks: WeekdayBlockCell[] = [];
@@ -331,32 +352,53 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
         block: b,
         trades: c.trades,
         realizedPnlUsd: c.realized.toFixed(2),
-        avgPnlPerTradeUsd: c.trades > 0 ? c.realized.div(c.trades).toFixed(2) : '0.00',
+        avgPnlPerTradeUsd:
+          c.trades > 0 ? c.realized.div(c.trades).toFixed(2) : '0.00',
       });
     }
   }
 
   const activeDays = dailyOut.length;
   const bestDay = dailyOut.reduce<DayBucket | null>(
-    (best, d) => (!best || Number(d.realizedPnlUsd) > Number(best.realizedPnlUsd) ? d : best),
+    (best, d) =>
+      !best || Number(d.realizedPnlUsd) > Number(best.realizedPnlUsd)
+        ? d
+        : best,
     null,
   );
   const worstDay = dailyOut.reduce<DayBucket | null>(
-    (worst, d) => (!worst || Number(d.realizedPnlUsd) < Number(worst.realizedPnlUsd) ? d : worst),
+    (worst, d) =>
+      !worst || Number(d.realizedPnlUsd) < Number(worst.realizedPnlUsd)
+        ? d
+        : worst,
     null,
   );
 
   const entryByToken = [...tokens.entries()]
     .filter(([, s]) => s.buyCount > 0)
-    .map(([mint, s]) => ({ mint, symbol: s.symbol, buyUsd: s.buyUsd.toFixed(2), buys: s.buyCount }))
+    .map(([mint, s]) => ({
+      mint,
+      symbol: s.symbol,
+      buyUsd: s.buyUsd.toFixed(2),
+      buys: s.buyCount,
+    }))
     .sort((a, b) => Number(b.buyUsd) - Number(a.buyUsd));
 
-  const totalBuyUsd = [...tokens.values()].reduce((acc, s) => acc.plus(s.buyUsd), ZERO);
+  const totalBuyUsd = [...tokens.values()].reduce(
+    (acc, s) => acc.plus(s.buyUsd),
+    ZERO,
+  );
   const avgBuyUsd = buys > 0 ? totalBuyUsd.div(buys) : ZERO;
 
-  const feePct = volumeTotal.gt(0) ? Number(feesTotal.div(volumeTotal).times(100).toFixed(4)) : 0;
-  const priceResolvedPct = totalTrades > 0 ? Number(((priceResolvedCount / totalTrades) * 100).toFixed(2)) : 100;
-  const avgPnlPerTrade = totalTrades > 0 ? realizedTotal.div(totalTrades) : ZERO;
+  const feePct = volumeTotal.gt(0)
+    ? Number(feesTotal.div(volumeTotal).times(100).toFixed(4))
+    : 0;
+  const priceResolvedPct =
+    totalTrades > 0
+      ? Number(((priceResolvedCount / totalTrades) * 100).toFixed(2))
+      : 100;
+  const avgPnlPerTrade =
+    totalTrades > 0 ? realizedTotal.div(totalTrades) : ZERO;
 
   // ── Win rate (posições fechadas: vendas casadas) ──
   let winners = 0;
@@ -370,7 +412,8 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
     closed: closedSells.length,
     winners,
     losers,
-    winRatePct: decided > 0 ? Number(((winners / decided) * 100).toFixed(2)) : 0,
+    winRatePct:
+      decided > 0 ? Number(((winners / decided) * 100).toFixed(2)) : 0,
   };
 
   // ── Concentração do LUCRO BRUTO: quanto dos GANHOS vem dos melhores trades. ──
@@ -398,13 +441,22 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
     totalUsd: grossTotal.toFixed(2), // lucro bruto (soma dos ganhos)
     closedTrades: closedSells.length, // total de posições fechadas (contexto p/ "X de N")
     top3: concBucket(sumRange(0, 3), Math.min(3, winnersLen)),
-    next7: concBucket(sumRange(3, 10), Math.max(0, Math.min(10, winnersLen) - 3)),
+    next7: concBucket(
+      sumRange(3, 10),
+      Math.max(0, Math.min(10, winnersLen) - 3),
+    ),
     rest: concBucket(sumRange(10, winnersLen), Math.max(0, winnersLen - 10)),
   };
 
   // ── Desfecho por múltiplo de saída (% sobre o total de posições fechadas) ──
   const closedLen = closedSells.length;
-  const OUTCOME_KEYS: OutcomeKey[] = ['rugpull', 'stop_loss', 'x1_2', 'x2_5', 'x5_plus'];
+  const OUTCOME_KEYS: OutcomeKey[] = [
+    'rugpull',
+    'stop_loss',
+    'x1_2',
+    'x2_5',
+    'x5_plus',
+  ];
   const outcomeAgg = new Map<OutcomeKey, { count: number; realized: Dec }>(
     OUTCOME_KEYS.map((k) => [k, { count: 0, realized: ZERO }]),
   );
@@ -418,7 +470,8 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
     return {
       bucket: k,
       count: agg.count,
-      pctOfClosed: closedLen > 0 ? Number(((agg.count / closedLen) * 100).toFixed(2)) : 0,
+      pctOfClosed:
+        closedLen > 0 ? Number(((agg.count / closedLen) * 100).toFixed(2)) : 0,
       realizedPnlUsd: agg.realized.toFixed(2),
     };
   });
@@ -481,8 +534,10 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
     volumeUsd: volumeTotal.toFixed(2),
     feePctOfVolume: feePct,
 
-    avgHoldSecondsWinners: holdWinQty > 0 ? Math.round(holdWinWeight / holdWinQty) : null,
-    avgHoldSecondsLosers: holdLossQty > 0 ? Math.round(holdLossWeight / holdLossQty) : null,
+    avgHoldSecondsWinners:
+      holdWinQty > 0 ? Math.round(holdWinWeight / holdWinQty) : null,
+    avgHoldSecondsLosers:
+      holdLossQty > 0 ? Math.round(holdLossWeight / holdLossQty) : null,
 
     entrySizes: {
       totalBuyUsd: totalBuyUsd.toFixed(2),
@@ -492,7 +547,8 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
 
     perDay: {
       activeDays,
-      avgTradesPerActiveDay: activeDays > 0 ? Number((totalTrades / activeDays).toFixed(2)) : 0,
+      avgTradesPerActiveDay:
+        activeDays > 0 ? Number((totalTrades / activeDays).toFixed(2)) : 0,
       avgPnlPerTrade: avgPnlPerTrade.toFixed(2),
       bestDay,
       worstDay,
@@ -536,10 +592,16 @@ export function computeClosedPositions(
   opts: PnlOptions,
 ): ClosedPosition[] {
   const windowStart = opts.windowStart;
-  const inWindow = (t: TradeInput) => !windowStart || t.blockTime >= windowStart;
-  const sorted = [...trades].sort((a, b) => a.blockTime.getTime() - b.blockTime.getTime());
+  const inWindow = (t: TradeInput) =>
+    !windowStart || t.blockTime >= windowStart;
+  const sorted = [...trades].sort(
+    (a, b) => a.blockTime.getTime() - b.blockTime.getTime(),
+  );
 
-  const lotsByMint = new Map<string, { qty: Dec; unitCost: Dec; timeMs: number }[]>();
+  const lotsByMint = new Map<
+    string,
+    { qty: Dec; unitCost: Dec; timeMs: number }[]
+  >();
   const symbolByMint = new Map<string, string | null>();
   const positions: ClosedPosition[] = [];
 
@@ -592,5 +654,64 @@ export function computeClosedPositions(
     });
   }
 
+  return positions;
+}
+
+/**
+ * Extrai as POSIÇÕES ABERTAS (lotes de compra FIFO ainda não vendidos) = o que a
+ * carteira AINDA SEGURA hoje, com a base de custo em USD. Processa TODOS os trades
+ * (sem janela — holdings são estado atual, não do período). Insumo do PnL
+ * não-realizado (valor atual × preço − custo). Vendas sem lote (windfall) só
+ * consomem lotes; não geram posição negativa.
+ */
+export function computeOpenPositions(trades: TradeInput[]): OpenPosition[] {
+  const sorted = [...trades].sort(
+    (a, b) => a.blockTime.getTime() - b.blockTime.getTime(),
+  );
+  const lotsByMint = new Map<string, { qty: Dec; unitCost: Dec }[]>();
+  const symbolByMint = new Map<string, string | null>();
+
+  for (const t of sorted) {
+    if (t.baseSymbol && !symbolByMint.get(t.baseMint)) {
+      symbolByMint.set(t.baseMint, t.baseSymbol);
+    }
+    const qty = new D(t.baseAmount || '0');
+    let lots = lotsByMint.get(t.baseMint);
+    if (!lots) {
+      lots = [];
+      lotsByMint.set(t.baseMint, lots);
+    }
+    if (t.side === TradeSide.BUY) {
+      lots.push({ qty, unitCost: new D(t.priceUsd || '0') });
+      continue;
+    }
+    // SELL: consome lotes FIFO. Sobra sem lote (windfall) é ignorada.
+    let remaining = qty;
+    while (remaining.gt(0) && lots.length > 0) {
+      const lot = lots[0];
+      const take = Prisma.Decimal.min(remaining, lot.qty);
+      lot.qty = lot.qty.minus(take);
+      remaining = remaining.minus(take);
+      if (lot.qty.lte(0)) lots.shift();
+    }
+  }
+
+  const positions: OpenPosition[] = [];
+  for (const [mint, lots] of lotsByMint) {
+    let qty = ZERO;
+    let costUsd = ZERO;
+    for (const lot of lots) {
+      qty = qty.plus(lot.qty);
+      costUsd = costUsd.plus(lot.qty.times(lot.unitCost));
+    }
+    if (qty.gt(0)) {
+      positions.push({
+        mint,
+        symbol: symbolByMint.get(mint) ?? null,
+        qty: qty.toString(),
+        costUsd: costUsd.toFixed(2),
+      });
+    }
+  }
   return positions;
 }

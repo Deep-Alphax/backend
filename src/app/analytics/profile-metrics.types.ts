@@ -17,6 +17,14 @@ export interface ClosedPosition {
   tradingPnlUsd: number; // PnL de trading da posição
 }
 
+/** Posição AINDA EM CARTEIRA (lotes FIFO não vendidos) — base do PnL não-realizado. */
+export interface OpenPosition {
+  mint: string;
+  symbol: string | null;
+  qty: string; // quantidade remanescente
+  costUsd: string; // base de custo (USD) da quantidade remanescente
+}
+
 /** Vela OHLC mínima que o engine de pico consome (primitivos, sem acoplar provider). */
 export interface CandlePoint {
   timeMs: number; // início do bucket (UTC)
@@ -61,9 +69,22 @@ export interface Survival {
   unknown: number;
 }
 
+/**
+ * PnL NÃO-REALIZADO: valor atual das posições ainda em carteira (posições abertas)
+ * menos a base de custo delas. Precisa de preço atual (Bloco 2, best-effort). Token
+ * sem preço (sem par/rugado) conta como valor 0 → perda de 100% do custo.
+ */
+export interface Unrealized {
+  available: boolean; // houve preço p/ estimar (senão null)
+  unrealizedPnlUsd: string | null; // valor atual − custo das posições abertas
+  openPositions: number; // nº de tokens ainda em carteira
+  pricedPositions: number; // quantos deles tiveram preço resolvido
+}
+
 /** Resposta completa do endpoint de perfil: Bloco 1 (PnlResult) + Bloco 2. */
 export interface ProfileMetrics extends PnlResult {
   peaks: PeakMetrics;
   survival: Survival;
   benchmark: Benchmark;
+  unrealized: Unrealized;
 }

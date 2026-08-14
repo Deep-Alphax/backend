@@ -1,7 +1,7 @@
 import { Injectable, Inject, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Prisma, SyncStatus, Wallet, WalletKind } from '@prisma/client';
+import { Prisma, SyncStatus, Wallet } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   MARKET_DATA_PROVIDER,
@@ -13,20 +13,23 @@ import {
 /** Nome do evento emitido quando uma carteira sincroniza com trades novos. */
 export const WALLET_SYNCED_EVENT = 'wallet.synced';
 
-/** Payload de `wallet.synced`. Consumido pelo SourcesModule p/ reatribuição. */
+/**
+ * Payload de `wallet.synced`. Consumido pelo SourcesModule p/ reatribuição. Como a
+ * carteira é COMPARTILHADA, o evento é emitido UMA VEZ POR usuário que a cataloga
+ * (cada um recomputa a própria atribuição).
+ */
 export interface WalletSyncedEvent {
   userId: string;
   walletId: string;
-  kind: WalletKind;
   inserted: number;
 }
 
 /**
- * Evento de MUDANÇA DE ESTADO do sync de uma carteira OWN, destinado ao cliente
- * (empurrado via WebSocket pelo EventsGateway). Diferente de `wallet.synced` (que
- * só dispara quando há trades novos), este dispara SEMPRE que o sync termina —
- * inclusive com 0 trades ou erro — para o dashboard sair do estado "sincronizando"
- * em tempo real, sem polling. Só carteiras OWN (as que alimentam o dashboard).
+ * Evento de MUDANÇA DE ESTADO do sync, destinado ao cliente (empurrado via WebSocket
+ * pelo EventsGateway). Diferente de `wallet.synced` (que só dispara quando há trades
+ * novos), este dispara SEMPRE que o sync termina — inclusive com 0 trades ou erro —
+ * para o dashboard sair do estado "sincronizando" em tempo real, sem polling. Emitido
+ * por usuário que cataloga a carteira (fan-out — a carteira é compartilhada).
  */
 export const WALLET_SYNC_STATE_EVENT = 'wallet.sync.state';
 export interface WalletSyncStateEvent {
@@ -65,6 +68,14 @@ export class WalletSyncService {
   private static readonly MAX_SYNC_ATTEMPTS = 6;
   /** Backoff por tentativa, em minutos (satura no último). */
   private static readonly RETRY_BACKOFF_MIN = [1, 2, 5, 15, 30, 60];
+
+  /**
+   * Limite de frescor: ao ABRIR uma carteira já sincronizada, só dispara um sync
+   * incremental (preenche a lacuna) se passou disto desde o último sync. Menor =
+   * mais fresco/mais chamadas; maior = mais barato. Configurável por env; default 1 dia.
+   */
+  private static readonly STALE_MS =
+    Number(process.env.WALLET_STALE_MS) || 24 * 60 * 60 * 1000;
 
   /** Evita sobreposição de execuções do cron (tick lento não empilha). */
   private running = false;
@@ -140,7 +151,7 @@ export class WalletSyncService {
           ? 'incremental'
           : 'backfill(full)';
       this.logger.log(
-        `Sync START wallet ${wallet.id} (${wallet.kind}, ${wallet.chain}) addr=${wallet.address} ` +
+        `Sync START wallet ${wallet.id} (${wallet.chain}) addr=${wallet.address} ` +
           `modo=${mode} sinceBlockTime=${sinceBlockTime?.toISOString() ?? 'null'} cursor=${cursor ? 'sim' : 'não'}`,
       );
 
@@ -207,34 +218,35 @@ export class WalletSyncService {
         },
       });
 
-      if (inserted > 0) {
-        // Carteira OWN alimenta as métricas do usuário → invalida os snapshots.
-        // Carteira SOURCE não entra nas métricas dele (só na atribuição) → não invalida.
-        if (wallet.kind === WalletKind.OWN) {
-          await this.invalidateSnapshots(wallet.userId, wallet.id);
+      // Fan-out: a carteira é COMPARTILHADA → todo usuário que a cataloga precisa ter
+      // o cache invalidado, a atribuição recomputada e o WebSocket empurrado.
+      const userIds = await this.catalogUserIds(wallet.id);
+      const status = morePages ? SyncStatus.PENDING : SyncStatus.SYNCED;
+
+      if (inserted > 0 && userIds.length > 0) {
+        await this.invalidateSnapshots(userIds, wallet.id);
+        // Trades novos podem mudar a atribuição por fonte de CADA catalogador.
+        for (const userId of userIds) {
+          this.events.emit(WALLET_SYNCED_EVENT, {
+            userId,
+            walletId: wallet.id,
+            inserted,
+          } satisfies WalletSyncedEvent);
         }
-        // Trades novos (de qualquer kind) podem mudar a atribuição por fonte.
-        const payload: WalletSyncedEvent = {
-          userId: wallet.userId,
-          walletId: wallet.id,
-          kind: wallet.kind,
-          inserted,
-        };
-        this.events.emit(WALLET_SYNCED_EVENT, payload);
       }
       // Estado do sync → cliente (WebSocket). SEMPRE que termina (mesmo 0 trades),
-      // para o dashboard reagir em tempo real. Só OWN (alimentam o dashboard).
-      if (wallet.kind === WalletKind.OWN) {
+      // para o dashboard de cada catalogador reagir em tempo real.
+      for (const userId of userIds) {
         this.events.emit(WALLET_SYNC_STATE_EVENT, {
-          userId: wallet.userId,
+          userId,
           walletId: wallet.id,
-          status: morePages ? SyncStatus.PENDING : SyncStatus.SYNCED,
+          status,
           inserted,
         } satisfies WalletSyncStateEvent);
       }
       this.logger.log(
-        `Wallet ${wallet.id} (${wallet.kind}) ${morePages ? 'parcial (backfill continua)' : 'sincronizada'} ` +
-          `(${inserted} trades novos, ${pages} páginas).`,
+        `Wallet ${wallet.id} ${morePages ? 'parcial (backfill continua)' : 'sincronizada'} ` +
+          `(${inserted} trades novos, ${pages} páginas, ${userIds.length} catalogadores).`,
       );
     } catch (err: any) {
       // Classifica a falha: transitória (retenta com backoff) vs permanente (desiste).
@@ -259,9 +271,11 @@ export class WalletSyncService {
       });
 
       // Estado ERROR → cliente (WebSocket), p/ tirar o dashboard do "sincronizando".
-      if (wallet.kind === WalletKind.OWN) {
+      // Fan-out p/ todos os catalogadores da carteira compartilhada.
+      const userIds = await this.catalogUserIds(wallet.id);
+      for (const userId of userIds) {
         this.events.emit(WALLET_SYNC_STATE_EVENT, {
-          userId: wallet.userId,
+          userId,
           walletId: wallet.id,
           status: SyncStatus.ERROR,
           inserted: 0,
@@ -330,13 +344,58 @@ export class WalletSyncService {
     return result.count;
   }
 
-  /** Invalida os snapshots de métrica da carteira e do portfólio do usuário. */
+  /**
+   * "Portão de frescor": ao ABRIR/selecionar uma carteira, dispara um sync incremental
+   * (preenche a lacuna) se ela nunca foi sincronizada OU está stale além de STALE_MS.
+   * Se já está sincronizando/na fila, não faz nada (reusa o que vier). Fire-and-forget:
+   * responde já; o WebSocket avisa quando os trades novos entram. Retorna se disparou.
+   */
+  async ensureFresh(walletId: string): Promise<boolean> {
+    const w = await this.prisma.getReadClient().wallet.findUnique({
+      where: { id: walletId },
+    });
+    if (!w || !w.isActive) return false;
+    // Já rodando/enfileirada → o resultado será reusado; não redispara.
+    if (
+      w.syncStatus === SyncStatus.SYNCING ||
+      w.syncStatus === SyncStatus.PENDING
+    ) {
+      return false;
+    }
+    const neverSynced = w.lastSyncedAt == null && w.syncCursor == null;
+    const stale =
+      w.lastSyncedAt != null &&
+      Date.now() - w.lastSyncedAt.getTime() > WalletSyncService.STALE_MS;
+    if (!neverSynced && !stale) return false;
+
+    void this.syncWallet(w).catch((e) =>
+      this.logger.warn(
+        `ensureFresh sync falhou p/ wallet ${walletId}: ${e?.message}`,
+      ),
+    );
+    return true;
+  }
+
+  /** userIds de todos os usuários que catalogam a carteira (fan-out compartilhado). */
+  private async catalogUserIds(walletId: string): Promise<string[]> {
+    const rows = await this.prisma.getReadClient().walletCatalog.findMany({
+      where: { walletId },
+      select: { userId: true },
+    });
+    return rows.map((r) => r.userId);
+  }
+
+  /** Invalida os snapshots de métrica dos usuários que catalogam a carteira. */
   private async invalidateSnapshots(
-    userId: string,
+    userIds: string[],
     walletId: string,
   ): Promise<void> {
+    if (userIds.length === 0) return;
     await this.prisma.getWriteClient().metricSnapshot.deleteMany({
-      where: { userId, OR: [{ walletId }, { scope: 'PORTFOLIO' }] },
+      where: {
+        userId: { in: userIds },
+        OR: [{ walletId }, { scope: 'PORTFOLIO' }],
+      },
     });
   }
 }
