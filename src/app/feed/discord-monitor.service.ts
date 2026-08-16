@@ -260,6 +260,7 @@ export class DiscordMonitorService implements OnModuleInit, OnModuleDestroy {
         channelId: origin.channelId,
         channelName: origin.channelName,
         authorTag: origin.authorTag,
+        authorId: message.author?.id ? String(message.author.id) : null,
         matchedPattern: monitor.pattern,
         discordMessageId: String(target?.id ?? message.id ?? ''),
         text,

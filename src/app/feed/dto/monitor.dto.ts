@@ -110,6 +110,12 @@ export class FeedQueryDto {
   @MaxLength(64)
   monitorId?: string;
 
+  // Filtra por autor (snowflake do Discord) — feed do perfil de um usuário.
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  authorId?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(200)

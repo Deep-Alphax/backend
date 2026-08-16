@@ -15,6 +15,7 @@ export interface CaptureInput {
   channelId: string;
   channelName?: string | null;
   authorTag?: string | null;
+  authorId?: string | null;
   matchedPattern?: string | null;
   discordMessageId?: string | null;
   text: string;
@@ -43,6 +44,7 @@ export class FeedService {
         channelId: input.channelId,
         channelName: input.channelName ?? null,
         authorTag: input.authorTag ?? null,
+        authorId: input.authorId ?? null,
         matchedPattern: input.matchedPattern ?? null,
         discordMessageId: input.discordMessageId ?? null,
         text: input.text,
@@ -100,6 +102,7 @@ export class FeedService {
     const where: Prisma.CapturedMessageWhereInput = {
       ...(query.channelId ? { channelId: query.channelId } : {}),
       ...(query.monitorId ? { monitorId: query.monitorId } : {}),
+      ...(query.authorId ? { authorId: query.authorId } : {}),
       ...(query.search
         ? { text: { contains: query.search, mode: 'insensitive' } }
         : {}),
@@ -125,5 +128,42 @@ export class FeedService {
       .capturedMessage.findUnique({ where: { id } });
     if (!item) throw new NotFoundException('Captura não encontrada');
     return item;
+  }
+
+  /**
+   * Estatísticas do perfil de um autor (snowflake): total de mensagens, tokens
+   * distintos citados (via `MessageCall`, contando cada CA/mint OU ticker único)
+   * e a primeira captura (idade "no radar"). Consultas indexadas por `authorId`.
+   */
+  async getAuthorStats(authorId: string): Promise<{
+    authorId: string;
+    messages: number;
+    tokens: number;
+    firstSeenAt: string | null;
+  }> {
+    const read = this.prisma.getReadClient();
+
+    const [messages, first, tokenRows] = await Promise.all([
+      read.capturedMessage.count({ where: { authorId } }),
+      read.capturedMessage.findFirst({
+        where: { authorId },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true },
+      }),
+      // Tokens únicos = COALESCE(mint, ticker) distintos nas calls do autor.
+      read.$queryRaw<{ tokens: bigint }[]>`
+        SELECT COUNT(DISTINCT COALESCE(mc."mint", mc."ticker")) AS tokens
+        FROM "MessageCall" mc
+        JOIN "CapturedMessage" cm ON cm."id" = mc."capturedMessageId"
+        WHERE cm."authorId" = ${authorId}
+      `,
+    ]);
+
+    return {
+      authorId,
+      messages,
+      tokens: Number(tokenRows[0]?.tokens ?? 0),
+      firstSeenAt: first?.createdAt.toISOString() ?? null,
+    };
   }
 }
