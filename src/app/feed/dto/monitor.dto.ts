@@ -116,6 +116,12 @@ export class FeedQueryDto {
   @MaxLength(64)
   authorId?: string;
 
+  // Filtra por autor via tag (identidade presente em 100% das capturas).
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  authorTag?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(200)

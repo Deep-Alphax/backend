@@ -103,6 +103,7 @@ export class FeedService {
       ...(query.channelId ? { channelId: query.channelId } : {}),
       ...(query.monitorId ? { monitorId: query.monitorId } : {}),
       ...(query.authorId ? { authorId: query.authorId } : {}),
+      ...(query.authorTag ? { authorTag: query.authorTag } : {}),
       ...(query.search
         ? { text: { contains: query.search, mode: 'insensitive' } }
         : {}),
@@ -131,12 +132,13 @@ export class FeedService {
   }
 
   /**
-   * Estatísticas do perfil de um autor (snowflake): total de mensagens, tokens
-   * distintos citados (via `MessageCall`, contando cada CA/mint OU ticker único)
-   * e a primeira captura (idade "no radar"). Consultas indexadas por `authorId`.
+   * Estatísticas do perfil de um autor (identidade por `authorTag`, presente em
+   * 100% das capturas): total de mensagens, tokens distintos citados (via
+   * `MessageCall`, cada CA/mint OU ticker único) e a primeira captura (idade "no
+   * radar"). Indexado por `[authorTag, createdAt]`.
    */
-  async getAuthorStats(authorId: string): Promise<{
-    authorId: string;
+  async getAuthorStats(authorTag: string): Promise<{
+    authorTag: string;
     messages: number;
     tokens: number;
     firstSeenAt: string | null;
@@ -144,9 +146,9 @@ export class FeedService {
     const read = this.prisma.getReadClient();
 
     const [messages, first, tokenRows] = await Promise.all([
-      read.capturedMessage.count({ where: { authorId } }),
+      read.capturedMessage.count({ where: { authorTag } }),
       read.capturedMessage.findFirst({
-        where: { authorId },
+        where: { authorTag },
         orderBy: { createdAt: 'asc' },
         select: { createdAt: true },
       }),
@@ -155,12 +157,12 @@ export class FeedService {
         SELECT COUNT(DISTINCT COALESCE(mc."mint", mc."ticker")) AS tokens
         FROM "MessageCall" mc
         JOIN "CapturedMessage" cm ON cm."id" = mc."capturedMessageId"
-        WHERE cm."authorId" = ${authorId}
+        WHERE cm."authorTag" = ${authorTag}
       `,
     ]);
 
     return {
-      authorId,
+      authorTag,
       messages,
       tokens: Number(tokenRows[0]?.tokens ?? 0),
       firstSeenAt: first?.createdAt.toISOString() ?? null,

@@ -26,9 +26,9 @@ export class FeedController {
     return this.feed.getById(id);
   }
 
-  @Get('feed/authors/:authorId/stats')
+  @Get('feed/author-stats')
   @ApiOperation({ summary: 'Estatísticas do perfil de um autor (mensagens, tokens, 1ª captura)' })
-  authorStats(@Param('authorId') authorId: string) {
-    return this.feed.getAuthorStats(authorId);
+  authorStats(@Query('authorTag') authorTag: string) {
+    return this.feed.getAuthorStats(authorTag);
   }
 }

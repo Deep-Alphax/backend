@@ -64,14 +64,16 @@ export class FavoritesService {
       where: { userId },
       select: { authorId: true },
     });
-    const authorIds = favorites.map((f) => f.authorId);
+    // A chave de follow é o authorTag (identidade presente em 100% das capturas);
+    // guardada na coluna `authorId` do favorito. Casamos por authorTag.
+    const keys = favorites.map((f) => f.authorId);
 
     // Sem favoritos → sem consulta pesada.
-    if (authorIds.length === 0) {
+    if (keys.length === 0) {
       return { items: [], page, limit, total: 0, totalPages: 0 };
     }
 
-    const where = { authorId: { in: authorIds } };
+    const where = { authorTag: { in: keys } };
     const [items, total] = await Promise.all([
       read.capturedMessage.findMany({
         where,

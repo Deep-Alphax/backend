@@ -459,7 +459,10 @@ model CapturedMessage {
   @@index([monitorId])
   @@index([createdAt])
   // "Mensagens por autor" (perfil / feed de favoritos) — paginação por recência.
+  // authorTag é a identidade usada (presente em 100% das capturas; o snowflake
+  // authorId só passou a ser gravado depois e cobre parte do histórico).
   @@index([authorId, createdAt])
+  @@index([authorTag, createdAt])
 }
 
 // "Call" derivada de uma mensagem capturada: um token (CA/mint) e/ou ticker citado
@@ -501,16 +504,16 @@ model BlacklistedUser {
 }
 
 // Autor do Discord "seguido" (favoritado) por um usuário da plataforma. Escopo por
-// conta; identidade estável pelo snowflake (`authorId`). `authorTag` guarda a última
-// tag vista, só para exibição sem depender de uma captura recente. Idempotente por
-// (userId, authorId).
+// conta. A CHAVE de follow (`authorId`) guarda o `authorTag` do autor — identidade
+// presente em 100% das capturas (o snowflake só cobre parte do histórico). Casa
+// com `CapturedMessage.authorTag`. Idempotente por (userId, authorId).
 model FavoriteAuthor {
   id     String @id @default(cuid())
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  authorId  String // snowflake do autor no Discord (match exato)
-  authorTag String? // última tag conhecida (exibição)
+  authorId  String // chave de follow = authorTag do autor (match exato)
+  authorTag String? // exibição (redundante com a chave; mantido por clareza)
 
   createdAt DateTime @default(now())
 
