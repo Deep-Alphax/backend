@@ -4,7 +4,10 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { FeedController } from './feed.controller';
 import { MonitorsController } from './monitors.controller';
 import { BlacklistController } from './blacklist.controller';
-import { FavoritesController } from './favorites.controller';
+import {
+  FavoritesController,
+  FavoritePhotoController,
+} from './favorites.controller';
 import { FeedService } from './feed.service';
 import { MonitorsService } from './monitors.service';
 import { BlacklistService } from './blacklist.service';
@@ -24,6 +27,7 @@ import { DiscordMonitorService } from './discord-monitor.service';
     MonitorsController,
     BlacklistController,
     FavoritesController,
+    FavoritePhotoController,
   ],
   providers: [
     FeedService,

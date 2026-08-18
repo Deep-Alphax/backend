@@ -26,6 +26,14 @@ export class FeedController {
     return this.feed.getById(id);
   }
 
+  @Get('feed/groups')
+  @ApiOperation({
+    summary: 'Árvore de grupos (servidores) e subgrupos (canais) com contagens reais',
+  })
+  groups() {
+    return this.feed.getGroups();
+  }
+
   @Get('feed/author-stats')
   @ApiOperation({ summary: 'Estatísticas do perfil de um autor (mensagens, tokens, 1ª captura)' })
   authorStats(@Query('authorTag') authorTag: string) {

@@ -515,6 +515,16 @@ model FavoriteAuthor {
   authorId  String // chave de follow = authorTag do autor (match exato)
   authorTag String? // exibição (redundante com a chave; mantido por clareza)
 
+  // Personalização por conta (modal "Personalizar usuário").
+  nickname String? // apelido dado pelo usuário (sobrepõe o nome exibido)
+  color    String? // chave de cor do avatar (allowlist), null = cor por hash
+
+  // Foto do avatar re-hospedada (bytes NOSSOS, webp), servida por endpoint público
+  // pela chave `id` (cuid, não enumerável) — mesmo padrão do avatar de usuário.
+  photoData      Bytes?
+  photoMime      String?
+  photoUpdatedAt DateTime? // cache-busting da URL da foto
+
   createdAt DateTime @default(now())
 
   @@unique([userId, authorId])
