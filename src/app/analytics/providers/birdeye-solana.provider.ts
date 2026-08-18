@@ -54,40 +54,61 @@ export class BirdeyeSolanaProvider {
       throw new ProviderRequestError('BIRDEYE_API_KEY não configurada', 401);
     }
     const limit = Math.min(params.limit ?? 100, 100);
-    const offset = params.cursor ? Number(params.cursor) : 0;
-    const sinceMs = params.sinceBlockTime
-      ? params.sinceBlockTime.getTime()
+    const sinceSec = params.sinceBlockTime
+      ? Math.floor(params.sinceBlockTime.getTime() / 1000)
       : null;
 
-    const items = await this.fetchItems('/trader/txs/seek_by_time', {
+    // Paginação por TEMPO (`before_time`), NÃO por offset: o Birdeye rejeita offset
+    // acima de 10.000 registros (422 "The number of records exceeds 10000") —
+    // carteiras muito ativas (>10k swaps na janela) estouravam e o sync morria como
+    // erro permanente. `before_time` não tem esse teto. O cursor guarda o
+    // `before_time` (Unix s) da próxima página.
+    const cursorNum = params.cursor ? Number(params.cursor) : NaN;
+    // Compat com cursores ANTIGOS (que eram OFFSET, < 1e6): só trata como before_time
+    // se for um timestamp plausível (> 1e9); senão recomeça do topo — o `skipDuplicates`
+    // no banco deduplica o que já foi importado, então é seguro.
+    const beforeTime =
+      Number.isFinite(cursorNum) && cursorNum > 1_000_000_000 ? cursorNum : null;
+
+    const query: Record<string, string> = {
       address: params.address,
-      offset: String(offset),
       limit: String(limit),
       tx_type: 'swap',
       sort_type: 'desc',
-    });
+    };
+    if (beforeTime != null) query.before_time = String(beforeTime);
+
+    const items = await this.fetchItems('/trader/txs/seek_by_time', query);
 
     const swaps: ProviderSwap[] = [];
     let reachedOld = false;
+    let oldestSec = Number.POSITIVE_INFINITY;
     for (const it of items) {
-      const tsMs = (Number(it?.block_unix_time) || 0) * 1000;
-      // Piso da janela: sort desc → ao cruzar, para de paginar.
-      if (sinceMs != null && tsMs < sinceMs) {
+      const tsSec = Number(it?.block_unix_time) || 0;
+      // Piso da janela: sort desc → ao cruzar, para de paginar (resto é mais antigo).
+      if (sinceSec != null && tsSec < sinceSec) {
         reachedOld = true;
         break;
       }
+      if (tsSec > 0) oldestSec = Math.min(oldestSec, tsSec);
       const s = this.map(it, params.address);
       if (s) swaps.push(s);
     }
 
     this.logger.log(
-      `Birdeye Solana ${params.address}: offset=${offset} → ${items.length} txs, ` +
-        `${swaps.length} swaps (reachedOld=${reachedOld})`,
+      `Birdeye Solana ${params.address}: before_time=${beforeTime ?? 'agora'} → ` +
+        `${items.length} txs, ${swaps.length} swaps (reachedOld=${reachedOld})`,
     );
 
-    // Continua só se a página veio cheia e não cruzou a fronteira.
+    // Próxima página: ANTES do mais antigo desta página (exclusivo, −1s, para não
+    // repetir nem entrar em loop). Continua só se a página veio cheia e não cruzou a
+    // janela. (Risco teórico: >100 swaps no MESMO segundo perderiam o excedente —
+    // inexistente p/ uma única carteira; o −1s evita loop, que é o que importa.)
     const full = items.length >= limit;
-    const nextCursor = full && !reachedOld ? String(offset + limit) : null;
+    const nextCursor =
+      full && !reachedOld && Number.isFinite(oldestSec)
+        ? String(oldestSec - 1)
+        : null;
     return { swaps, nextCursor };
   }
 

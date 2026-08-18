@@ -191,6 +191,27 @@ export class WalletSyncService {
       const pinnedSource = wallet.syncSource;
       let source = pinnedSource ?? this.defaultSource(wallet.chain);
 
+      // ZERO RE-BUSCA no BACKFILL do Birdeye (cursor = before_time em s): se o cursor
+      // não é um before_time válido — legado em OFFSET, ou ausente após um resync de
+      // backfill incompleto — retoma do trade MAIS ANTIGO já importado na janela, em
+      // vez de recomeçar do topo e re-baixar o que já veio. Só backfill
+      // (lastSyncedAt == null); o incremental busca o delta novo a partir de agora.
+      if (source === SwapSource.BIRDEYE && wallet.lastSyncedAt == null) {
+        const cursorNum = cursor != null ? Number(cursor) : NaN;
+        const validBeforeTime =
+          Number.isFinite(cursorNum) && cursorNum > 1_000_000_000;
+        if (!validBeforeTime) {
+          const oldest = await this.prisma.getReadClient().trade.findFirst({
+            where: { walletId: wallet.id, blockTime: { gte: sinceBlockTime } },
+            orderBy: { blockTime: 'asc' },
+            select: { blockTime: true },
+          });
+          cursor = oldest
+            ? String(Math.floor(oldest.blockTime.getTime() / 1000) - 1)
+            : null; // sem trades na janela → começa do topo (before_time=agora)
+        }
+      }
+
       const mode = resumingBackfill
         ? 'backfill(resume)'
         : wallet.lastSyncedAt

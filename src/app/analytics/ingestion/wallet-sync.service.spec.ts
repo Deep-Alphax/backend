@@ -1,4 +1,10 @@
-import { SyncStatus, TradeSide, ChainType, Chain } from '@prisma/client';
+import {
+  SyncStatus,
+  TradeSide,
+  ChainType,
+  Chain,
+  SwapSource,
+} from '@prisma/client';
 import { WalletSyncService } from './wallet-sync.service';
 import { ProviderRequestError } from '../providers/market-data-provider.interface';
 
@@ -9,7 +15,11 @@ function makeService() {
       findMany: jest.fn(),
       findUnique: jest.fn(),
     },
-    trade: { createMany: jest.fn() },
+    trade: {
+      createMany: jest.fn(),
+      // Usado só no backfill Birdeye p/ retomar do trade mais antigo (zero re-busca).
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
     metricSnapshot: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
     // Fan-out: catalogadores da carteira compartilhada (default: 1 usuário).
     walletCatalog: {
@@ -282,6 +292,43 @@ describe('WalletSyncService', () => {
     expect(arg.sinceBlockTime.getTime()).toBeGreaterThanOrEqual(before);
     expect(arg.sinceBlockTime.getTime()).toBeLessThanOrEqual(after);
     expect(arg.cursor).toBe('cur-123');
+  });
+
+  it('BACKFILL Birdeye: cursor legado (offset) → retoma do trade mais antigo (zero re-busca)', async () => {
+    const { service, provider, client } = makeService();
+    provider.fetchSwaps.mockResolvedValueOnce({ swaps: [], nextCursor: null });
+    // Trade mais antigo já importado na janela → o before_time deve continuar DAQUI.
+    const oldestMs = new Date('2026-08-10T12:00:00Z').getTime();
+    client.trade.findFirst.mockResolvedValue({ blockTime: new Date(oldestMs) });
+
+    await service.syncWallet({
+      ...wallet,
+      chain: Chain.SOLANA,
+      chainType: ChainType.SOLANA,
+      syncSource: SwapSource.BIRDEYE, // pinada no Birdeye
+      lastSyncedAt: null, // backfill
+      syncCursor: '9900', // cursor LEGADO em offset
+    });
+
+    const arg = provider.fetchSwaps.mock.calls[0][0];
+    // before_time = segundo do mais antigo − 1 (exclusivo) — NÃO recomeça do topo.
+    expect(arg.cursor).toBe(String(Math.floor(oldestMs / 1000) - 1));
+  });
+
+  it('BACKFILL Birdeye: sem trades ainda → cursor null (começa do topo)', async () => {
+    const { service, provider, client } = makeService();
+    provider.fetchSwaps.mockResolvedValueOnce({ swaps: [], nextCursor: null });
+    client.trade.findFirst.mockResolvedValue(null); // nada importado
+
+    await service.syncWallet({
+      ...wallet,
+      chain: Chain.SOLANA,
+      chainType: ChainType.SOLANA,
+      syncSource: SwapSource.BIRDEYE,
+      lastSyncedAt: null,
+      syncCursor: '9900',
+    });
+    expect(provider.fetchSwaps.mock.calls[0][0].cursor).toBeNull();
   });
 
   it('drainPending respeita o guard de execução concorrente', async () => {
