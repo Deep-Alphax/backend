@@ -204,27 +204,26 @@ export class AllExceptionsFilter implements ExceptionFilter {
       );
     }
 
-    // Log detalhado para debug
+    // Nível do log POR STATUS: só 5xx (bug/infra real) sai como ERROR + stack. Os
+    // 4xx são esperados (validação, auth, e — sobretudo — 404 de rota inexistente
+    // que SCANNERS de vulnerabilidade disparam às dezenas: POST /sigin, /wp-login,
+    // /_next/…) → WARN de UMA linha, SEM stack, pra não afogar o log e esconder erro
+    // de verdade. Um stack trace por probe de bot era puro ruído.
     const requestUrl = httpAdapter.getRequestUrl(request);
     const requestMethod = request.method;
-    
-    if (httpStatus === HttpStatus.BAD_REQUEST && errors) {
-      // Log mais detalhado para erros de validação
-      this.logger.error(
-        `Validation failed on ${requestMethod} ${requestUrl}`,
-        {
-          message,
-          errors,
-          body: request.body,
-          query: request.query,
-          params: request.params,
-        },
-      );
-    } else {
+
+    if (httpStatus >= HttpStatus.INTERNAL_SERVER_ERROR) {
       this.logger.error(
         `Exception: ${message} on ${requestMethod} ${requestUrl}`,
         exception instanceof Error ? exception.stack : undefined,
       );
+    } else if (httpStatus === HttpStatus.BAD_REQUEST && errors) {
+      // Validação: WARN com o detalhe (útil p/ diagnosticar o cliente), sem stack.
+      this.logger.warn(
+        `Validation failed on ${requestMethod} ${requestUrl}: ${JSON.stringify(errors)}`,
+      );
+    } else {
+      this.logger.warn(`${httpStatus} ${message} on ${requestMethod} ${requestUrl}`);
     }
 
     const responseBody: any = {
