@@ -48,6 +48,19 @@ export class DiscordMonitorService implements OnModuleInit, OnModuleDestroy {
   private ready = false;
   private userTag: string | null = null;
 
+  // ── Reconexão resiliente (self-bot cai fácil; sem isto ficava down até restart) ──
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectAttempts = 0;
+  private loggingIn = false;
+  private lastLoginAt = 0;
+  private destroyed = false;
+  /** Espaçamento MÍNIMO entre logins (anti "login storm" que o Discord pune). */
+  private static readonly MIN_LOGIN_INTERVAL_MS = 60_000;
+  private static readonly RECONNECT_BASE_MS = 30_000;
+  private static readonly RECONNECT_MAX_MS = 10 * 60_000;
+  /** O guard global de unhandledRejection é instalado uma única vez por processo. */
+  private static safetyNetInstalled = false;
+
   /** Regras ativas indexadas por canal e por servidor (match rápido no messageCreate). */
   private monitorsByChannel = new Map<string, DiscordMonitor[]>();
   private monitorsByGuild = new Map<string, DiscordMonitor[]>();
@@ -68,6 +81,12 @@ export class DiscordMonitorService implements OnModuleInit, OnModuleDestroy {
     await this.refreshMonitors();
     await this.refreshBlacklist();
 
+    // Rede de segurança GLOBAL: o self-bot (lib não-oficial) pode lançar rejeições
+    // não tratadas do WebSocket que, por padrão no Node, DERRUBAM o processo — o que
+    // criava um crash-loop de boot (app nunca subia). Aqui só logamos: o app nunca
+    // cai por causa do bot. Instalado 1× e só quando o self-bot está habilitado.
+    this.installSafetyNet();
+
     const token = this.config.get<string>('DISCORD_USER_TOKEN');
     if (!token) {
       this.logger.warn(
@@ -75,38 +94,126 @@ export class DiscordMonitorService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
-
-    try {
-      this.client = new Client({ checkUpdate: false });
-      this.client.on('ready', () => {
-        this.ready = true;
-        this.userTag = this.client?.user?.tag ?? null;
-        this.logger.log(`Self-bot logado como ${this.userTag}`);
-      });
-      this.client.on('messageCreate', (msg: any) => {
-        this.handleMessage(msg).catch((err) =>
-          this.logger.debug(`Erro ao processar mensagem: ${err?.message}`),
-        );
-      });
-      this.client.on('error', (err: any) =>
-        this.logger.warn(`Discord error: ${err?.message}`),
-      );
-
-      await this.client.login(token);
-    } catch (err: any) {
-      // Nunca derruba o boot por causa do self-bot.
-      this.logger.error(`Falha ao iniciar o self-bot: ${err?.message}`);
-      this.client = null;
-      this.ready = false;
-    }
+    // Não bloqueia o boot: conecta em background e se reconecta sozinho se cair.
+    void this.connect();
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.destroyed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     try {
       await this.client?.destroy?.();
     } catch {
       /* ignore */
     }
+  }
+
+  /** Instala o guard global de unhandledRejection (uma vez por processo). */
+  private installSafetyNet(): void {
+    if (DiscordMonitorService.safetyNetInstalled) return;
+    DiscordMonitorService.safetyNetInstalled = true;
+    process.on('unhandledRejection', (reason: any) => {
+      this.logger.error(
+        `unhandledRejection isolada (app SEGUE no ar): ${reason?.message ?? reason}`,
+      );
+    });
+  }
+
+  /**
+   * (Re)conecta o self-bot. Idempotente e seguro: destrói o cliente antigo, respeita
+   * o intervalo mínimo entre logins (anti login-storm) e, em qualquer falha, agenda
+   * nova tentativa com backoff exponencial. NUNCA propaga erro (não derruba o app).
+   */
+  private async connect(): Promise<void> {
+    const token = this.config.get<string>('DISCORD_USER_TOKEN');
+    if (!token || this.destroyed || this.loggingIn) return;
+
+    const since = Date.now() - this.lastLoginAt;
+    if (since < DiscordMonitorService.MIN_LOGIN_INTERVAL_MS) {
+      // Muito cedo p/ relogar → adia (protege o token do rate-limit do Discord).
+      this.scheduleReconnect(DiscordMonitorService.MIN_LOGIN_INTERVAL_MS - since);
+      return;
+    }
+
+    this.loggingIn = true;
+    this.lastLoginAt = Date.now();
+    try {
+      try {
+        await this.client?.destroy?.();
+      } catch {
+        /* cliente antigo pode já estar morto */
+      }
+      this.client = new Client({ checkUpdate: false });
+      this.wireClientEvents();
+      await this.client.login(token);
+    } catch (err: any) {
+      this.ready = false;
+      this.logger.error(
+        `Login do self-bot falhou: ${err?.message ?? err}. Reagendando…`,
+      );
+      this.scheduleReconnect();
+    } finally {
+      this.loggingIn = false;
+    }
+  }
+
+  /** Liga os handlers do cliente: mensagens + reconexão em quedas. */
+  private wireClientEvents(): void {
+    const c = this.client;
+    c.on('ready', () => {
+      this.ready = true;
+      this.reconnectAttempts = 0; // conexão OK → zera o backoff
+      this.userTag = c?.user?.tag ?? null;
+      this.logger.log(`Self-bot logado como ${this.userTag}`);
+    });
+    c.on('messageCreate', (msg: any) => {
+      this.handleMessage(msg).catch((err) =>
+        this.logger.debug(`Erro ao processar mensagem: ${err?.message}`),
+      );
+    });
+    // 'error'/'shardError' PRECISAM ter listener: EventEmitter sem listener de
+    // 'error' lança e derruba o processo. Aqui só logamos.
+    c.on('error', (err: any) =>
+      this.logger.warn(`Discord error: ${err?.message}`),
+    );
+    c.on('shardError', (err: any) =>
+      this.logger.warn(`Discord shardError: ${err?.message}`),
+    );
+    // Quedas → reconecta com backoff. `invalidated` = sessão morta (token pode
+    // precisar ser renovado); mesmo assim tentamos, e o log avisa.
+    const onDrop = (why: string) => {
+      if (this.destroyed) return;
+      this.ready = false;
+      this.logger.warn(`Self-bot caiu (${why}) → agendando reconexão`);
+      this.scheduleReconnect();
+    };
+    c.on('disconnect', () => onDrop('disconnect'));
+    c.on('shardDisconnect', () => onDrop('shardDisconnect'));
+    c.on('invalidated', () => onDrop('invalidated'));
+    c.on('destroyed', () => onDrop('destroyed'));
+  }
+
+  /** Agenda uma reconexão com backoff exponencial + jitter (ou um delay fixo). */
+  private scheduleReconnect(delayMs?: number): void {
+    if (this.destroyed || this.reconnectTimer) return;
+    this.reconnectAttempts += 1;
+    const backoff = Math.min(
+      DiscordMonitorService.RECONNECT_BASE_MS *
+        2 ** (this.reconnectAttempts - 1),
+      DiscordMonitorService.RECONNECT_MAX_MS,
+    );
+    const jitter = Math.floor(backoff * 0.2 * Math.random());
+    const wait = delayMs ?? backoff + jitter;
+    this.logger.warn(
+      `Reconexão do self-bot em ${Math.round(wait / 1000)}s (tentativa ${this.reconnectAttempts}).`,
+    );
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connect();
+    }, wait);
   }
 
   /** Recarrega as regras ativas do banco (chamado no boot e quando o CRUD muda). */
@@ -172,6 +279,8 @@ export class DiscordMonitorService implements OnModuleInit, OnModuleDestroy {
     return {
       enabled: !!this.config.get<string>('DISCORD_USER_TOKEN'),
       connected: this.ready,
+      reconnecting: !this.ready && this.reconnectTimer != null,
+      reconnectAttempts: this.reconnectAttempts,
       userTag: this.userTag,
       telegramEnabled: this.telegram.enabled,
       activeMonitors: [
