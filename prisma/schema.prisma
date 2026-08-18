@@ -101,6 +101,18 @@ enum SyncStatus {
   ERROR // última sync falhou (ver syncError)
 }
 
+// Fonte de swaps "pinada" por carteira: decidida no 1º sync e NUNCA trocada — os
+// trades de uma carteira vêm sempre da MESMA fonte, evitando mistura (a mesma tx
+// reconstruída por dois providers viraria linhas duplicadas/inconsistentes).
+//  - BIRDEYE: Solana (trades dedicados, USD real) — primário quando há key.
+//  - HELIUS:  Solana (reconstrução por delta) — fallback se o Birdeye falhar no 1º sync.
+//  - MORALIS: EVM (Wallet API).
+enum SwapSource {
+  BIRDEYE
+  HELIUS
+  MORALIS
+}
+
 // Papel da carteira no sistema:
 //  - OWN: carteira DO usuário (entra nas métricas de portfólio/PnL dele).
 //  - SOURCE: carteira de uma FONTE de alpha que o usuário segue (ingerida para
@@ -136,7 +148,8 @@ model Wallet {
   isActive    Boolean   @default(true)
 
   // Estado de sincronização com o provider.
-  syncStatus   SyncStatus @default(PENDING)
+  syncStatus   SyncStatus  @default(PENDING)
+  syncSource   SwapSource? // fonte de swaps pinada (decidida no 1º sync, imutável)
   syncCursor   String? // cursor de paginação do provider (ingestão incremental)
   syncError    String?
   lastSyncedAt DateTime?
@@ -393,6 +406,47 @@ model TokenCandle {
 
   @@unique([chain, mint, timeframe, openTime])
   @@index([chain, mint, timeframe, openTime])
+}
+
+// Cobertura de candles já BUSCADOS por (chain, mint, timeframe). Registra a janela
+// [fromTime, toTime] que já consultamos no provider — MESMO quando ele devolveu 0
+// candles (token morto/sem OHLCV). Serve de "negative cache": se a janela pedida já
+// está coberta, servimos do banco (possivelmente vazio) SEM tocar a API. Candles
+// históricos são imutáveis → uma janela passada nunca precisa ser refeita.
+model TokenCandleCoverage {
+  chain     Chain
+  mint      String
+  timeframe String // '1h' | '1d'
+  fromTime  DateTime // início da janela já coberta (UTC)
+  toTime    DateTime // fim da janela já coberta (UTC)
+  fetchedAt DateTime @default(now())
+
+  @@id([chain, mint, timeframe])
+}
+
+// Preço/liquidez ATUAL de um token, PERSISTIDO (não só cache). Uma linha por
+// (chain, mint) — a última leitura do provider (Jupiter/DexScreener). `fetchedAt`
+// é o critério de frescor: leituras recentes são reusadas sem tocar a API.
+// `priceUsd` null = sem mercado/liquidez (rugado) — também persistido p/ não
+// re-consultar token morto a cada request.
+model TokenPrice {
+  chain        Chain
+  mint         String
+  priceUsd     Decimal? @db.Decimal(38, 18)
+  liquidityUsd Decimal? @db.Decimal(38, 2)
+  fetchedAt    DateTime @default(now())
+
+  @@id([chain, mint])
+  @@index([fetchedAt])
+}
+
+// Preço do SOL (USD) por DIA (fechamento), persistido. O fechamento diário é
+// imutável → uma vez salvo, nunca refaz chamada (CoinGecko). Base do USD dos
+// swaps SOL-quoted e de conversões.
+model SolDayPrice {
+  day       String   @id // YYYY-MM-DD (UTC)
+  priceUsd  Decimal  @db.Decimal(38, 18)
+  fetchedAt DateTime @default(now())
 }
 
 // ─────────────────────────── Discord Feed (bot) ───────────────────────────

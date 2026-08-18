@@ -6,6 +6,7 @@ import { CommonModule } from '../../common/common.module';
 import { MARKET_DATA_PROVIDER } from './providers/market-data-provider.interface';
 import { MoralisProvider } from './providers/moralis.provider';
 import { HeliusSolanaProvider } from './providers/helius-solana.provider';
+import { BirdeyeSolanaProvider } from './providers/birdeye-solana.provider';
 import { CompositeMarketDataProvider } from './providers/composite-market-data.provider';
 import { WalletSyncService } from './ingestion/wallet-sync.service';
 import { CandleService } from './candle.service';
@@ -25,6 +26,7 @@ import { AnalyticsController } from './analytics.controller';
     // Fontes concretas + roteador. Swaps Solana→Helius, EVM→Moralis; OHLC/preço→Moralis.
     MoralisProvider,
     HeliusSolanaProvider,
+    BirdeyeSolanaProvider,
     { provide: MARKET_DATA_PROVIDER, useClass: CompositeMarketDataProvider },
     WalletSyncService,
     CandleService,

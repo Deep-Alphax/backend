@@ -37,7 +37,8 @@ export class CandleService {
     timeframe: OhlcTimeframe = '1h',
   ): Promise<CandleFull[]> {
     try {
-      const cached = await this.prisma.getReadClient().tokenCandle.findMany({
+      const read = this.prisma.getReadClient();
+      const cached = await read.tokenCandle.findMany({
         where: { chain, mint, timeframe, openTime: { gte: from, lte: to } },
         orderBy: { openTime: 'asc' },
         select: { openTime: true, high: true, close: true },
@@ -50,9 +51,25 @@ export class CandleService {
         }));
       }
 
+      // Sem candle no banco p/ esta janela. NEGATIVE CACHE: se já consultamos o
+      // provider para uma janela que cobre [from,to] (mesmo tendo voltado vazio —
+      // token morto/sem OHLCV), NÃO bate na API de novo. Candle histórico é imutável.
+      const cov = await read.tokenCandleCoverage.findUnique({
+        where: { chain_mint_timeframe: { chain, mint, timeframe } },
+      });
+      if (
+        cov &&
+        cov.fromTime.getTime() <= from.getTime() &&
+        cov.toTime.getTime() >= to.getTime()
+      ) {
+        return []; // janela já buscada e sem dado → poupa a chamada
+      }
+
       const fresh = await this.provider.fetchOhlc({ chain, mint, from, to, timeframe });
-      if (fresh.length === 0) return [];
       await this.persist(chainType, chain, mint, timeframe, fresh);
+      // Marca a janela como coberta MESMO se veio vazia (evita re-consultar token morto).
+      await this.markCoverage(chain, mint, timeframe, from, to, cov);
+      if (fresh.length === 0) return [];
       return fresh.map((c) => ({
         timeMs: c.openTime.getTime(),
         high: Number(c.high),
@@ -61,6 +78,36 @@ export class CandleService {
     } catch (err: any) {
       this.logger.warn(`getCandles ${mint} falhou: ${err?.message}`);
       return [];
+    }
+  }
+
+  /**
+   * Registra/expande a janela [fromTime, toTime] já consultada no provider para
+   * (chain, mint, timeframe). União com a cobertura existente. Best-effort: falha
+   * aqui só faz o negative cache não valer nessa rodada (re-consulta na próxima).
+   */
+  private async markCoverage(
+    chain: Chain,
+    mint: string,
+    timeframe: string,
+    from: Date,
+    to: Date,
+    existing: { fromTime: Date; toTime: Date } | null,
+  ): Promise<void> {
+    try {
+      const fromTime = existing
+        ? new Date(Math.min(existing.fromTime.getTime(), from.getTime()))
+        : from;
+      const toTime = existing
+        ? new Date(Math.max(existing.toTime.getTime(), to.getTime()))
+        : to;
+      await this.prisma.getWriteClient().tokenCandleCoverage.upsert({
+        where: { chain_mint_timeframe: { chain, mint, timeframe } },
+        create: { chain, mint, timeframe, fromTime, toTime },
+        update: { fromTime, toTime, fetchedAt: new Date() },
+      });
+    } catch (err: any) {
+      this.logger.warn(`markCoverage ${mint} falhou: ${err?.message}`);
     }
   }
 

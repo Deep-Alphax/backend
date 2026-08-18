@@ -1,4 +1,4 @@
-import { Chain, TradeSide } from '@prisma/client';
+import { Chain, SwapSource, TradeSide } from '@prisma/client';
 
 /** Token DI da implementação de provider de dados de mercado. */
 export const MARKET_DATA_PROVIDER = Symbol('MARKET_DATA_PROVIDER');
@@ -57,6 +57,12 @@ export interface ProviderSwap {
 export interface FetchSwapsParams {
   chain: Chain;
   address: string;
+  /**
+   * Fonte de swaps FIXA desta carteira (pin). Quando presente, o composite usa
+   * exatamente esse provider — nunca mistura fontes na mesma carteira. Ausente =
+   * default por chain.
+   */
+  source?: SwapSource | null;
   /** Cursor de paginação do provider (ingestão incremental). */
   cursor?: string | null;
   /** Só swaps a partir deste instante (sync incremental — janela desde lastSyncedAt). */
@@ -131,4 +137,14 @@ export interface MarketDataProvider {
    * provider suporta. Solana: SOL + SPL tokens; EVM: net-worth. `null` = indisponível.
    */
   fetchWalletBalanceUsd?(chain: Chain, address: string): Promise<string | null>;
+
+  /**
+   * Holdings on-chain REAIS (mint → qty) — a verdade do que a carteira segura AGORA.
+   * Base do não-realizado por valor realizável (em vez de reconstruir das trades).
+   * Opcional; `[]` quando indisponível. `qty` = string decimal (uiAmount).
+   */
+  fetchWalletHoldings?(
+    chain: Chain,
+    address: string,
+  ): Promise<Array<{ mint: string; qty: string }>>;
 }

@@ -143,7 +143,7 @@ function matchSell(
   };
 }
 
-/** Classifica uma posição fechada pelo múltiplo realizado (ver OutcomeKey). */
+/** Classifica um TOKEN fechado pelo múltiplo realizado agregado (ver OutcomeKey). */
 function outcomeOf(multiple: number): OutcomeKey {
   if (multiple < 0.1) return 'rugpull';
   if (multiple < 1) return 'stop_loss';
@@ -200,14 +200,31 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
   let afterLossLosers = 0;
   let afterLossRealized = ZERO;
 
-  // Posições fechadas (vendas casadas na janela) → win rate, concentração, desfechos.
+  // Posições fechadas (vendas casadas na janela) → win rate, concentração.
   const closedSells: ClosedSell[] = [];
+  // Desfecho POR TOKEN: soma da base de custo casada e do PnL realizado por mint na
+  // janela → % de retorno agregada do token (um token conta 1×, como na Axiom).
+  const closedByMint = new Map<string, { cost: Dec; realized: Dec }>();
 
   // Bankroll = pico do capital líquido investido (Σ compras − Σ vendas, na janela).
   let deployedNet = ZERO;
   let peakDeployed = ZERO;
 
   for (const t of sorted) {
+    const within = inWindow(t);
+    // Contagem de TRADES (janela): TODOS contam, mesmo sem preço resolvido — assim o
+    // total bate com fontes externas (Axiom/GMGN) e a confiança reflete a cobertura
+    // real. É só o FIFO/PnL abaixo que ignora os não-precificados.
+    if (within) {
+      totalTrades += 1;
+      if (t.side === TradeSide.BUY) buys += 1;
+      else sells += 1;
+      if (t.priceResolved) priceResolvedCount += 1;
+    }
+    // Sem preço USD confiável → não entra no FIFO: uma venda a "$0" realizaria
+    // `0 − custo` (perda fantasma) e uma compra a $0 viraria lucro inflado. A
+    // ingestão preenche o preço do SOL por dia vizinho; o que restar fica de fora.
+    if (!t.priceResolved) continue;
     let st = tokens.get(t.baseMint);
     if (!st) {
       st = newTokenState(t.baseSymbol);
@@ -219,13 +236,17 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
     const price = new D(t.priceUsd || '0');
     const usd = new D(t.usdValue || '0');
     const fee = new D(t.feeUsd || '0');
-    const within = inWindow(t);
 
     // PnL realizado DESTE trade (0 para compras).
     let realizedThis = ZERO;
+    // Variação do CAPITAL EM RISCO (base de custo das posições abertas): a compra
+    // deploya seu custo; a venda libera o CUSTO CASADO (não os proceeds). O pico
+    // disso é o "bankroll" real — quanto de capital esteve de fato trabalhando.
+    let deployedDelta = ZERO;
 
     if (t.side === TradeSide.BUY) {
       st.lots.push({ qty, unitCost: price, time: t.blockTime.getTime() });
+      deployedDelta = usd;
       if (within) {
         st.trades += 1;
         st.buyCount += 1;
@@ -234,6 +255,7 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
       }
     } else {
       const m = matchSell(st, qty, price, t.blockTime.getTime());
+      deployedDelta = m.costBasisUsd.negated(); // libera só o custo casado
       // A evolução do capital deve refletir SÓ trades reais (compra→venda casada). Por isso
       // realizedThis = só a parte CASADA; o windfall (proceeds de tokens que entraram na
       // carteira sem compra — transferência/airdrop/mint) é reportado à parte em
@@ -269,24 +291,31 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
               ? Number.POSITIVE_INFINITY
               : 0;
           closedSells.push({ tradingPnl: m.matchedRealized, multiple });
+
+          // Agrega o desfecho POR TOKEN (custo casado + realizado) — a % de retorno
+          // do token sai de Σrealizado / Σcusto, e o token conta uma única vez.
+          const cm = closedByMint.get(t.baseMint) ?? {
+            cost: ZERO,
+            realized: ZERO,
+          };
+          cm.cost = cm.cost.plus(m.costBasisUsd);
+          cm.realized = cm.realized.plus(m.matchedRealized);
+          closedByMint.set(t.baseMint, cm);
         }
       }
     }
 
     if (!within) continue;
 
-    // ── Atribuição de métricas da janela ──
-    totalTrades += 1;
-    if (t.side === TradeSide.BUY) buys += 1;
-    else sells += 1;
-    if (t.priceResolved) priceResolvedCount += 1;
+    // ── Atribuição de métricas da janela (PnL/volume só de trades precificados) ──
     feesTotal = feesTotal.plus(fee);
     volumeTotal = volumeTotal.plus(usd);
     realizedTotal = realizedTotal.plus(realizedThis);
 
-    // Capital líquido em risco: compra soma o notional, venda subtrai; o pico é o bankroll.
-    deployedNet =
-      t.side === TradeSide.BUY ? deployedNet.plus(usd) : deployedNet.minus(usd);
+    // Capital em risco = custo das posições abertas ao longo da janela; o pico é o
+    // bankroll (quanto de capital esteve trabalhando de fato). Não deixa negativar
+    // (venda de posição comprada fora da janela liberaria custo nunca deployado aqui).
+    deployedNet = Prisma.Decimal.max(ZERO, deployedNet.plus(deployedDelta));
     if (deployedNet.gt(peakDeployed)) peakDeployed = deployedNet;
 
     const { hour, date, weekday } = localParts(t.blockTime, tz);
@@ -416,14 +445,17 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
       decided > 0 ? Number(((winners / decided) * 100).toFixed(2)) : 0,
   };
 
-  // ── Concentração do LUCRO BRUTO: quanto dos GANHOS vem dos melhores trades. ──
-  // Denominador = soma só dos trades VENCEDORES (lucro bruto). Antes usávamos o
-  // PnL LÍQUIDO (ganhos − perdas): quando o líquido é ~0 (grandes ganhos e perdas
-  // se anulando), cada bucket / líquido explodia (ex.: 522%, 544%, −966%). Sobre
-  // os vencedores, os buckets ficam em 0–100% e somam 100% ("100% do lucro bruto").
-  // Perdas não têm "lucro" a concentrar → ficam fora deste card.
-  const winningPnls = closedSells
-    .map((s) => s.tradingPnl)
+  // ── Concentração do LUCRO BRUTO: quanto dos GANHOS vem dos melhores TOKENS. ──
+  // POR TOKEN (não por venda — igual aos desfechos): agrega o realizado de todas as
+  // vendas casadas do token e ranqueia os tokens vencedores. Por venda, o lucro de
+  // um token bom se fragmentava em dezenas de vendas e a concentração parecia baixa
+  // (top3 ~11%) sem sentido; por token, os melhores tokens aparecem de fato.
+  // Denominador = soma só dos tokens VENCEDORES (lucro bruto). Antes usávamos o PnL
+  // LÍQUIDO (ganhos − perdas): quando o líquido é ~0, cada bucket / líquido explodia.
+  // Sobre os vencedores, os buckets ficam em 0–100% e somam 100%. Perdas não têm
+  // "lucro" a concentrar → ficam fora deste card.
+  const winningPnls = [...closedByMint.values()]
+    .map((cm) => cm.realized)
     .filter((v) => v.gt(0))
     .sort((a, b) => b.cmp(a));
   const grossTotal = winningPnls.reduce((acc, v) => acc.plus(v), ZERO);
@@ -439,7 +471,7 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
   const winnersLen = winningPnls.length;
   const profitConcentration: ProfitConcentration = {
     totalUsd: grossTotal.toFixed(2), // lucro bruto (soma dos ganhos)
-    closedTrades: closedSells.length, // total de posições fechadas (contexto p/ "X de N")
+    closedTrades: closedByMint.size, // total de TOKENS negociados (contexto p/ "X de N")
     top3: concBucket(sumRange(0, 3), Math.min(3, winnersLen)),
     next7: concBucket(
       sumRange(3, 10),
@@ -448,8 +480,7 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
     rest: concBucket(sumRange(10, winnersLen), Math.max(0, winnersLen - 10)),
   };
 
-  // ── Desfecho por múltiplo de saída (% sobre o total de posições fechadas) ──
-  const closedLen = closedSells.length;
+  // ── Desfecho POR TOKEN pelo múltiplo (% sobre o total de tokens fechados) ──
   const OUTCOME_KEYS: OutcomeKey[] = [
     'rugpull',
     'stop_loss',
@@ -460,18 +491,32 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
   const outcomeAgg = new Map<OutcomeKey, { count: number; realized: Dec }>(
     OUTCOME_KEYS.map((k) => [k, { count: 0, realized: ZERO }]),
   );
-  for (const s of closedSells) {
-    const agg = outcomeAgg.get(outcomeOf(s.multiple))!;
+  for (const [mint, cm] of closedByMint) {
+    if (cm.cost.lte(0)) continue; // sem base de custo (só windfall) → fora
+    // Só posições TOTALMENTE FECHADAS (como a Axiom): se ainda restam lotes de compra
+    // não vendidos (FIFO), a posição não "terminou" → fora. `st.lots` fica vazio
+    // quando toda a quantidade comprada foi vendida (lotes consumidos são removidos).
+    const st = tokens.get(mint);
+    if (st && st.lots.length > 0) continue;
+    // multiple = proceeds/custo = 1 + realizado/custo → % de retorno do token.
+    const multiple = Number(cm.cost.plus(cm.realized).div(cm.cost).toString());
+    const agg = outcomeAgg.get(outcomeOf(multiple))!;
     agg.count += 1;
-    agg.realized = agg.realized.plus(s.tradingPnl);
+    agg.realized = agg.realized.plus(cm.realized);
   }
+  const closedTokens = [...outcomeAgg.values()].reduce(
+    (n, a) => n + a.count,
+    0,
+  );
   const outcomes: OutcomeBucket[] = OUTCOME_KEYS.map((k) => {
     const agg = outcomeAgg.get(k)!;
     return {
       bucket: k,
       count: agg.count,
       pctOfClosed:
-        closedLen > 0 ? Number(((agg.count / closedLen) * 100).toFixed(2)) : 0,
+        closedTokens > 0
+          ? Number(((agg.count / closedTokens) * 100).toFixed(2))
+          : 0,
       realizedPnlUsd: agg.realized.toFixed(2),
     };
   });
@@ -606,6 +651,7 @@ export function computeClosedPositions(
   const positions: ClosedPosition[] = [];
 
   for (const t of sorted) {
+    if (!t.priceResolved) continue; // sem preço confiável → não corrompe o FIFO
     if (t.baseSymbol && !symbolByMint.get(t.baseMint)) {
       symbolByMint.set(t.baseMint, t.baseSymbol);
     }
@@ -672,6 +718,7 @@ export function computeOpenPositions(trades: TradeInput[]): OpenPosition[] {
   const symbolByMint = new Map<string, string | null>();
 
   for (const t of sorted) {
+    if (!t.priceResolved) continue; // sem preço confiável → não corrompe o FIFO
     if (t.baseSymbol && !symbolByMint.get(t.baseMint)) {
       symbolByMint.set(t.baseMint, t.baseSymbol);
     }

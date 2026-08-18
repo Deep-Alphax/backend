@@ -1,9 +1,9 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { Chain, TradeSide } from '@prisma/client';
-import { CacheRedisService } from '../../../common/services/cache-redis.service';
+import { Chain, Prisma, TradeSide } from '@prisma/client';
+import { PrismaService } from '../../../prisma/prisma.service';
 import {
   FetchSwapsParams,
   FetchSwapsResult,
@@ -11,6 +11,13 @@ import {
   ProviderRequestError,
   TokenSnapshot,
 } from './market-data-provider.interface';
+
+/** Divide um array em lotes de tamanho `size` (p/ upserts em paralelo controlado). */
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 /**
  * Fonte de swaps Solana baseada na Enhanced Transactions API do Helius.
@@ -44,25 +51,27 @@ export class HeliusSolanaProvider {
     'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
     'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
   ]);
-  /** TTL (s) do cache do mapa preço-do-SOL-por-dia (fechamento diário é imutável). */
-  private static readonly SOLUSD_TTL = 24 * 60 * 60;
   /**
-   * TTL (s) do snapshot de token resolvido. Além de survival, o PREÇO alimenta o PnL
-   * NÃO-REALIZADO (valor das posições em carteira) — que precisa ser fresco. Mantido
-   * ABAIXO do TTL do cache de extras (30min) para que cada recomputo pegue preço novo.
-   * DexScreener é keyless (custo zero), então frescor sai de graça.
+   * Frescor (ms) do preço PERSISTIDO no banco (TokenPrice). Leitura mais nova que
+   * isto é reusada sem tocar a API; mais velha → refetch + upsert. O preço alimenta
+   * o não-realizado (posições em carteira), então precisa ser fresco.
    */
-  private static readonly SNAP_TTL_OK = 5 * 60;
-  /** TTL (s) do snapshot NÃO resolvido — curto, p/ auto-recuperar de falha transitória. */
-  private static readonly SNAP_TTL_MISS = 15 * 60;
+  private static readonly SNAP_FRESH_OK_MS = 5 * 60 * 1000;
+  /** Frescor (ms) do preço NÃO resolvido (token morto) — curto, p/ auto-recuperar. */
+  private static readonly SNAP_FRESH_MISS_MS = 15 * 60 * 1000;
 
   private readonly coinGeckoBase: string;
   private readonly coinGeckoKey: string;
+  private readonly jupiterBase: string;
+  /** IDs por chamada ao Jupiter Price API (limite prático do endpoint). */
+  private static readonly JUP_BATCH = 100;
+  /** Teto de mints precificados por carteira (holdings) — dust além disso vale ~0. */
+  private static readonly MAX_PRICED_MINTS = 800;
 
   constructor(
     private readonly config: ConfigService,
     private readonly http: HttpService,
-    @Optional() private readonly cache?: CacheRedisService,
+    private readonly prisma: PrismaService,
   ) {
     this.apiKey = this.config.get<string>('HELIUS_API_KEY') ?? '';
     this.base =
@@ -72,6 +81,83 @@ export class HeliusSolanaProvider {
       'https://api.coingecko.com/api/v3';
     // Opcional: key demo do CoinGecko (header x-cg-demo-api-key) sobe o rate limit.
     this.coinGeckoKey = this.config.get<string>('COINGECKO_API_KEY') ?? '';
+    // Jupiter Price API (grátis): cobre ~todo token Solana com rota — muito além do
+    // DexScreener. Primário de preço; DexScreener fica de fallback p/ os misses.
+    this.jupiterBase =
+      this.config.get<string>('JUPITER_PRICE_BASE') ??
+      'https://lite-api.jup.ag/price/v3';
+  }
+
+  /**
+   * Preço + liquidez (USD) por mint via Jupiter Price API v3 (grátis, sem key).
+   * Cobre bonding-curve pump.fun / Meteora / qualquer token roteável — onde o
+   * DexScreener falha. Lotes de JUP_BATCH; best-effort (lote que falha → misses).
+   */
+  private async jupiterSnapshots(
+    mints: string[],
+  ): Promise<Map<string, { priceUsd: number; liquidityUsd: number }>> {
+    const out = new Map<string, { priceUsd: number; liquidityUsd: number }>();
+    // Sem cap aqui: o teto vive em `resolveSnapshots` (que decide o conjunto
+    // TENTADO). Cortar aqui fazia mints reais além do teto virarem "sem preço" e,
+    // pior, serem persistidos como `null` (morto) → perda fantasma no não-realizado.
+    const uniq = [...new Set(mints)];
+    for (let i = 0; i < uniq.length; i += HeliusSolanaProvider.JUP_BATCH) {
+      const chunk = uniq.slice(i, i + HeliusSolanaProvider.JUP_BATCH);
+      try {
+        const resp = await firstValueFrom(
+          this.http.get(this.jupiterBase, {
+            params: { ids: chunk.join(',') },
+            headers: { accept: 'application/json' },
+            timeout: 12000,
+          } as any),
+        );
+        const data = resp.data ?? {};
+        for (const mint of chunk) {
+          const row = data[mint];
+          const price = Number(row?.usdPrice);
+          if (Number.isFinite(price) && price > 0) {
+            out.set(mint, {
+              priceUsd: price,
+              liquidityUsd: Number(row?.liquidity) || 0,
+            });
+          }
+        }
+      } catch {
+        /* lote falhou → mints ficam p/ o fallback */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Snapshot unificado (preço/liquidez) por mint: Jupiter primeiro (cobertura),
+   * DexScreener só p/ os que o Jupiter não resolveu (fallback de liquidez).
+   *
+   * Retorna também `attempted` — os mints que DE FATO consultamos (limitados por
+   * `MAX_PRICED_MINTS`). Só esses podem ser persistidos como `null` (morto) quando
+   * sem preço; os pulados pelo teto NÃO são persistidos (re-tentados na próxima) —
+   * senão um token real além do teto viraria "morto" e geraria perda fantasma.
+   */
+  private async resolveSnapshots(mints: string[]): Promise<{
+    snaps: Map<string, { priceUsd: number; liquidityUsd: number }>;
+    attempted: string[];
+  }> {
+    const uniq = [...new Set(mints)];
+    if (uniq.length === 0) return { snaps: new Map(), attempted: [] };
+    const attempted = uniq.slice(0, HeliusSolanaProvider.MAX_PRICED_MINTS);
+    if (uniq.length > attempted.length) {
+      this.logger.warn(
+        `resolveSnapshots: ${uniq.length} mints > teto ${HeliusSolanaProvider.MAX_PRICED_MINTS}; ` +
+          `${uniq.length - attempted.length} ficam p/ a próxima rodada (não marcados como mortos).`,
+      );
+    }
+    const snaps = await this.jupiterSnapshots(attempted);
+    const missing = attempted.filter((m) => !snaps.has(m));
+    if (missing.length > 0) {
+      const dex = await this.dexScreenerSnapshots(missing);
+      for (const [m, v] of dex) if (!snaps.has(m)) snaps.set(m, v);
+    }
+    return { snaps, attempted };
   }
 
   async fetchSwaps(params: FetchSwapsParams): Promise<FetchSwapsResult> {
@@ -272,51 +358,76 @@ export class HeliusSolanaProvider {
   }
 
   /**
-   * Saldo ATUAL em USD SEM Moralis: holdings via RPC (getBalance +
-   * getTokenAccountsByOwner, SPL clássico + Token-2022) × preço via DexScreener
-   * (grátis, sem key). Best-effort → null em falha.
+   * Holdings ATUAIS on-chain (RPC): SOL (como WSOL) + SPL clássico + Token-2022.
+   * `qty` = uiAmount (já com decimais). Fonte da VERDADE do que a carteira segura —
+   * base p/ o saldo e p/ o não-realizado (valor realizável).
+   */
+  private async getOnchainHoldings(address: string): Promise<Map<string, number>> {
+    const [bal, spl, spl22] = await Promise.all([
+      this.rpcCall('getBalance', [address]),
+      this.rpcCall('getTokenAccountsByOwner', [
+        address,
+        { programId: HeliusSolanaProvider.TOKEN_PROGRAM },
+        { encoding: 'jsonParsed' },
+      ]),
+      this.rpcCall('getTokenAccountsByOwner', [
+        address,
+        { programId: HeliusSolanaProvider.TOKEN_2022 },
+        { encoding: 'jsonParsed' },
+      ]),
+    ]);
+
+    const holdings = new Map<string, number>();
+    const solAmount = Number(bal?.value ?? 0) / 1e9;
+    if (solAmount > 0) holdings.set(HeliusSolanaProvider.WSOL, solAmount);
+    for (const acc of [...(spl?.value ?? []), ...(spl22?.value ?? [])]) {
+      const info = acc?.account?.data?.parsed?.info;
+      const mint = info?.mint;
+      const amt = Number(info?.tokenAmount?.uiAmount ?? 0);
+      if (mint && amt > 0) holdings.set(mint, (holdings.get(mint) ?? 0) + amt);
+    }
+    return holdings;
+  }
+
+  /** Holdings on-chain reais (mint → qty). Best-effort → [] em falha. */
+  async fetchWalletHoldings(
+    _chain: Chain,
+    address: string,
+  ): Promise<Array<{ mint: string; qty: string }>> {
+    try {
+      const h = await this.getOnchainHoldings(address);
+      return [...h.entries()].map(([mint, qty]) => ({ mint, qty: String(qty) }));
+    } catch (err: any) {
+      this.logger.warn(
+        `Holdings Solana (RPC) falhou (${address}): ${err?.message}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Saldo ATUAL em USD = APENAS o SOL nativo × preço do SOL. Decisão de produto:
+   * carteiras degen seguram milhares de memecoins pump.fun com preço nominal mas
+   * liquidez ~zero (invendáveis) — somá-los inflava o saldo (ex.: $6,5k reais viravam
+   * $8-26k). O SOL é o único ativo de fato líquido; é o que o Solscan mostra como
+   * "SOL Balance". Tokens entram no PnL não-realizado (à parte), não no saldo.
+   * 1 chamada RPC (getBalance) — barato. Best-effort → null em falha.
    */
   async fetchWalletBalanceUsd(
     _chain: Chain,
     address: string,
   ): Promise<string | null> {
     try {
-      const [bal, spl, spl22] = await Promise.all([
-        this.rpcCall('getBalance', [address]),
-        this.rpcCall('getTokenAccountsByOwner', [
-          address,
-          { programId: HeliusSolanaProvider.TOKEN_PROGRAM },
-          { encoding: 'jsonParsed' },
-        ]),
-        this.rpcCall('getTokenAccountsByOwner', [
-          address,
-          { programId: HeliusSolanaProvider.TOKEN_2022 },
-          { encoding: 'jsonParsed' },
-        ]),
-      ]);
-
-      const solAmount = Number(bal?.value ?? 0) / 1e9;
-      const holdings = new Map<string, number>();
-      for (const acc of [...(spl?.value ?? []), ...(spl22?.value ?? [])]) {
-        const info = acc?.account?.data?.parsed?.info;
-        const mint = info?.mint;
-        const amt = Number(info?.tokenAmount?.uiAmount ?? 0);
-        if (mint && amt > 0)
-          holdings.set(mint, (holdings.get(mint) ?? 0) + amt);
-      }
-
-      const prices = await this.dexScreenerPrices([
-        HeliusSolanaProvider.WSOL,
-        ...holdings.keys(),
-      ]);
-      let total = solAmount * (prices.get(HeliusSolanaProvider.WSOL) ?? 0);
-      for (const [mint, amt] of holdings)
-        total += amt * (prices.get(mint) ?? 0);
-
+      const bal = await this.rpcCall('getBalance', [address]);
+      const solQty = Number(bal?.value ?? 0) / 1e9;
+      if (!(solQty > 0)) return '0.00'; // sem SOL nativo
+      const solPrice = await this.currentSolUsd();
+      if (solPrice == null || !(solPrice > 0)) return null; // preço indisponível
+      const total = solQty * solPrice;
       return Number.isFinite(total) ? total.toFixed(2) : null;
     } catch (err: any) {
       this.logger.warn(
-        `Balanço Solana (RPC/DexScreener) falhou (${address}): ${err?.message}`,
+        `Saldo SOL (RPC) falhou (${address}): ${err?.message}`,
       );
       return null;
     }
@@ -358,17 +469,23 @@ export class HeliusSolanaProvider {
     return out;
   }
 
-  /** Só o preço (conveniência p/ o cálculo de saldo). */
+  /**
+   * Só o preço (conveniência p/ o cálculo de saldo). Passa pelo `fetchTokenSnapshots`
+   * para reusar/PERSISTIR os preços no banco (TokenPrice) — nada de rede quando fresco.
+   */
   private async dexScreenerPrices(
     mints: string[],
   ): Promise<Map<string, number>> {
-    const snaps = await this.dexScreenerSnapshots(mints);
+    const snaps = await this.fetchTokenSnapshots(Chain.SOLANA, mints);
     const out = new Map<string, number>();
-    for (const [mint, s] of snaps) out.set(mint, s.priceUsd);
+    for (const [mint, s] of snaps) {
+      const price = s ? Number(s.priceUsd) : NaN;
+      if (Number.isFinite(price) && price > 0) out.set(mint, price);
+    }
     return out;
   }
 
-  // ─────────────────── Snapshots de token (survival) — DexScreener + cache ───────────────────
+  // ─────────────── Snapshots de token (survival) — Jupiter/DexScreener + DB ───────────────
 
   fetchTokenSnapshot(
     _chain: Chain,
@@ -380,55 +497,83 @@ export class HeliusSolanaProvider {
   }
 
   /**
-   * Snapshots em LOTE (preço/liquidez) via DexScreener, SEM Moralis. Mesma estratégia
-   * de custo do adapter Moralis: cache Redis por mint (hits não tocam a rede), misses
-   * num único fetch batch; resultado (inclusive `null`) é cacheado — 6h resolvido,
-   * 15min falha. Best-effort: qualquer erro deixa o mint como `null`.
+   * Snapshots em LOTE (preço/liquidez) via Jupiter + DexScreener, SEM Moralis.
+   * PERSISTE no banco (tabela `TokenPrice`): hits frescos não tocam a rede; misses
+   * vão num único fetch batch e o resultado (inclusive `null`) é gravado — frescor
+   * de {@link SNAP_FRESH_OK_MS} p/ resolvido e {@link SNAP_FRESH_MISS_MS} p/ falha.
+   * Best-effort: qualquer erro deixa o mint como `null`.
    */
   async fetchTokenSnapshots(
-    _chain: Chain,
+    chain: Chain,
     mints: string[],
   ): Promise<Map<string, TokenSnapshot | null>> {
     const out = new Map<string, TokenSnapshot | null>();
     if (mints.length === 0) return out;
     const uniq = [...new Set(mints)];
+    const now = Date.now();
 
-    // Camada 1: cache por mint.
+    // Camada 1: PERSISTIDO no banco (TokenPrice) — leituras frescas são reusadas.
+    const rows = await this.prisma.getReadClient().tokenPrice.findMany({
+      where: { chain, mint: { in: uniq } },
+    });
+    const byMint = new Map(rows.map((r) => [r.mint, r]));
     const misses: string[] = [];
     for (const mint of uniq) {
-      const cached = this.cache
-        ? await this.cache.getJson<{ v: TokenSnapshot | null }>(
-            this.snapKey(mint),
-          )
-        : null;
-      if (cached) out.set(mint, cached.v);
-      else misses.push(mint);
+      const row = byMint.get(mint);
+      const ttl =
+        row?.priceUsd != null
+          ? HeliusSolanaProvider.SNAP_FRESH_OK_MS
+          : HeliusSolanaProvider.SNAP_FRESH_MISS_MS;
+      if (row && now - row.fetchedAt.getTime() < ttl) {
+        out.set(
+          mint,
+          row.priceUsd != null
+            ? {
+                priceUsd: row.priceUsd.toString(),
+                liquidityUsd:
+                  row.liquidityUsd != null ? row.liquidityUsd.toString() : null,
+              }
+            : null,
+        );
+      } else {
+        misses.push(mint);
+      }
     }
     if (misses.length === 0) return out;
 
-    // Camada 2: um batch DexScreener p/ os misses.
-    const snaps = await this.dexScreenerSnapshots(misses);
+    // Camada 2: Jupiter (primário) + DexScreener (fallback) p/ os misses.
+    const { snaps, attempted } = await this.resolveSnapshots(misses);
 
-    // Camada 3: registra e cacheia (inclusive null, TTL curto).
+    // Return: todo miss recebe seu snapshot (ou null se sem preço) p/ o chamador.
     for (const mint of misses) {
       const s = snaps.get(mint);
-      const snap: TokenSnapshot | null = s
-        ? { priceUsd: String(s.priceUsd), liquidityUsd: String(s.liquidityUsd) }
-        : null;
-      out.set(mint, snap);
-      await this.cache?.setJson(
-        this.snapKey(mint),
-        { v: snap },
-        snap
-          ? HeliusSolanaProvider.SNAP_TTL_OK
-          : HeliusSolanaProvider.SNAP_TTL_MISS,
+      out.set(
+        mint,
+        s
+          ? { priceUsd: String(s.priceUsd), liquidityUsd: String(s.liquidityUsd) }
+          : null,
+      );
+    }
+
+    // Camada 3: PERSISTE no banco SÓ os mints TENTADOS (upsert por (chain, mint),
+    // inclusive null=morto p/ os tentados-sem-preço). Mints além do teto ficam de
+    // fora → re-tentados depois (nunca marcados como mortos por engano).
+    const write = this.prisma.getWriteClient();
+    for (const chunk of chunkArray(attempted, 100)) {
+      await Promise.all(
+        chunk.map((mint) => {
+          const s = snaps.get(mint);
+          const priceUsd = s ? new Prisma.Decimal(s.priceUsd) : null;
+          const liquidityUsd = s ? new Prisma.Decimal(s.liquidityUsd) : null;
+          return write.tokenPrice.upsert({
+            where: { chain_mint: { chain, mint } },
+            create: { chain, mint, priceUsd, liquidityUsd },
+            update: { priceUsd, liquidityUsd, fetchedAt: new Date() },
+          });
+        }),
       );
     }
     return out;
-  }
-
-  private snapKey(mint: string): string {
-    return `helius:snap:v1:${mint}`;
   }
 
   // ─────────────────────────── Preço USD (perna SOL × preço do SOL no dia) ───────────────────────────
@@ -458,7 +603,12 @@ export class HeliusSolanaProvider {
     const from = new Date(Math.min(...times) - 86_400_000);
     const to = new Date(Math.max(...times) + 86_400_000);
     const byDay = await this.solUsdByDay(from, to);
-    // Fallback: se não houver série diária, usa o preço atual do SOL (aproximação).
+    // Preenche buracos: o CoinGecko às vezes pula dias → o swap desse dia ficava
+    // SEM preço (usdValue=0) e corrompia o PnL (perda fantasma no FIFO). Carrega o
+    // dia conhecido mais próximo (fwd + back fill). Preço do SOL não varia tão
+    // rápido entre dias vizinhos → aproximação muito melhor que $0.
+    this.carryFillDays(byDay, from, to);
+    // Fallback final: se não houver NENHUMA série diária, usa o preço atual do SOL.
     const current = byDay.size === 0 ? await this.currentSolUsd() : null;
 
     for (const s of solQuoted) {
@@ -477,10 +627,9 @@ export class HeliusSolanaProvider {
   }
 
   /**
-   * Preço do SOL (USD) por dia (YYYY-MM-DD). Cache POR DIA no Redis: o fechamento
-   * diário é imutável, então dias já vistos (por outras páginas/carteiras) NÃO
-   * refazem chamada. Só bate no CoinGecko (grátis, sem key) para os dias que faltam,
-   * num único intervalo contíguo — corta drasticamente o custo no backfill.
+   * Preço do SOL (USD) por dia (YYYY-MM-DD), PERSISTIDO no banco (SolDayPrice). O
+   * fechamento diário é imutável → dia já salvo NUNCA refaz chamada. Só bate no
+   * CoinGecko (grátis, sem key) para os dias que faltam, num único intervalo.
    */
   private async solUsdByDay(
     from: Date,
@@ -490,18 +639,22 @@ export class HeliusSolanaProvider {
     const days = this.enumerateDays(from, to);
     if (days.length === 0) return out;
 
-    // 1) tenta o cache por dia.
-    const missing: string[] = [];
-    for (const day of days) {
-      const cached = this.cache
-        ? await this.cache.getJson<number>(this.solDayKey(day))
-        : null;
-      if (cached != null && cached > 0) out.set(day, cached);
-      else missing.push(day);
+    // 1) banco (imutável): dias já persistidos.
+    const rows = await this.prisma.getReadClient().solDayPrice.findMany({
+      where: { day: { in: days } },
+    });
+    const saved = new Set<string>();
+    for (const r of rows) {
+      const p = Number(r.priceUsd);
+      if (p > 0) {
+        out.set(r.day, p);
+        saved.add(r.day);
+      }
     }
+    const missing = days.filter((d) => !saved.has(d));
     if (missing.length === 0) return out;
 
-    // 2) CoinGecko market_chart/range SÓ do intervalo faltante (uma vez); cacheia cada dia.
+    // 2) CoinGecko market_chart/range SÓ do intervalo faltante (uma vez); persiste.
     const fromSec = Math.floor(
       new Date(`${missing[0]}T00:00:00Z`).getTime() / 1000,
     );
@@ -509,15 +662,21 @@ export class HeliusSolanaProvider {
       new Date(`${missing[missing.length - 1]}T23:59:59Z`).getTime() / 1000,
     );
     const byDay = await this.coinGeckoSolDaily(fromSec, toSec);
+    // O dia de HOJE (UTC) ainda não fechou → NÃO persiste (senão congela um valor
+    // intradiário como se fosse o fechamento). É reusado em memória e re-buscado no
+    // próximo sync. Só dias já fechados vão pro banco (imutáveis).
+    const today = new Date().toISOString().slice(0, 10);
+    const data: { day: string; priceUsd: Prisma.Decimal }[] = [];
     for (const [day, price] of byDay) {
       if (price > 0) {
         out.set(day, price);
-        await this.cache?.setJson(
-          this.solDayKey(day),
-          price,
-          HeliusSolanaProvider.SOLUSD_TTL,
-        );
+        if (day < today) data.push({ day, priceUsd: new Prisma.Decimal(price) });
       }
+    }
+    if (data.length > 0) {
+      await this.prisma
+        .getWriteClient()
+        .solDayPrice.createMany({ data, skipDuplicates: true });
     }
     return out;
   }
@@ -561,8 +720,28 @@ export class HeliusSolanaProvider {
     return out;
   }
 
-  private solDayKey(day: string): string {
-    return `helius:solusd:d:${day}`;
+
+  /**
+   * Preenche dias sem preço no mapa `byDay` carregando o dia conhecido mais
+   * próximo: forward-fill (usa o último dia conhecido) e depois back-fill (para os
+   * dias antes do primeiro conhecido). No-op se o mapa estiver vazio.
+   */
+  private carryFillDays(byDay: Map<string, number>, from: Date, to: Date): void {
+    if (byDay.size === 0) return;
+    const days = this.enumerateDays(from, to);
+    let last: number | null = null;
+    for (const d of days) {
+      const v = byDay.get(d);
+      if (v != null && v > 0) last = v;
+      else if (last != null) byDay.set(d, last);
+    }
+    let next: number | null = null;
+    for (let i = days.length - 1; i >= 0; i--) {
+      const d = days[i];
+      const v = byDay.get(d);
+      if (v != null && v > 0) next = v;
+      else if (next != null) byDay.set(d, next);
+    }
   }
 
   /** Lista de dias (YYYY-MM-DD, UTC) no intervalo [from, to], inclusive. Bounded. */

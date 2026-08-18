@@ -249,7 +249,13 @@ export class AnalyticsService {
     });
     // `v2` versiona o SHAPE do PnlResult: ao evoluir os campos (ex.: métricas de
     // perfil), muda o hash e invalida snapshots antigos sem migration manual.
-    const tradesHash = `v4:${agg._count._all}:${agg._max.createdAt?.getTime() ?? 0}:${tzOffsetMinutes}`;
+    // v6: bankroll = pico do CUSTO das posições abertas (capital real em risco),
+    // no lugar do fluxo líquido de caixa — corrige os % de retorno/drawdown.
+    // v7: desfechos ("como seus trades terminaram") agora agregam POR TOKEN, não
+    // por venda (um token conta 1×, como na Axiom).
+    // v8: desfechos contam só posições TOTALMENTE FECHADAS (sem lotes restantes).
+    // v9: concentração do lucro agora é POR TOKEN (antes por venda).
+    const tradesHash = `v9:${agg._count._all}:${agg._max.createdAt?.getTime() ?? 0}:${tzOffsetMinutes}`;
 
     const cached = await read.metricSnapshot.findFirst({
       where: { userId, walletId, scope, period },
@@ -344,7 +350,14 @@ export class AnalyticsService {
     });
     // v2: o objeto cacheado ganhou `unrealized` — a versão invalida caches v1 (sem ele).
     const cacheKey =
-      `analytics:extras:v2:${period}:${tzOffsetMinutes}:` +
+      // v5: candles (pico) via Birdeye — cobre memecoin (a Moralis não indexava).
+      // v6: invalida resultados calculados com candles esparsos legados da Moralis
+      // (o TokenCandle foi repovoado pelo Birdeye, com séries completas).
+      // v7: invalida não-realizado inflado por TokenPrice envenenado com null (cap
+      // de precificação marcava tokens reais como mortos → perda fantasma).
+      // v8: candles agora priorizam os mints das posições RECENTES (topo × saída) —
+      // muda o hasData/perTrade em carteiras com muitos tokens.
+      `analytics:extras:v8:${period}:${tzOffsetMinutes}:` +
       `${this.hashWalletIds(walletIds)}:${sig._count._all}:${sig._max.createdAt?.getTime() ?? 0}`;
 
     const cached = await this.cache?.getJson<{
@@ -399,7 +412,15 @@ export class AnalyticsService {
       }
     }
 
-    const mints = [...spanByMint.keys()].slice(0, MAX_TOKENS_PER_REQUEST);
+    // Prioriza os mints das posições MAIS RECENTES (por saída) — são exatamente os
+    // que o gráfico "topo × saída" mostra (perTrade = N mais recentes). Sem isto, o
+    // slice pegava os mints mais ANTIGOS (ordem de inserção) e as posições recentes
+    // ficavam sem candle → hasData=false → gráfico quase vazio em carteiras com muitos
+    // tokens (> MAX_TOKENS_PER_REQUEST).
+    const mints = [...spanByMint.entries()]
+      .sort((a, b) => b[1].to - a[1].to)
+      .slice(0, MAX_TOKENS_PER_REQUEST)
+      .map(([mint]) => mint);
 
     // Candles por token → pico/captura.
     const candlesByMint = new Map<string, CandleFull[]>();
@@ -469,20 +490,50 @@ export class AnalyticsService {
         // best-effort: sem preço → conta como valor 0 (perda total)
       }
     }
+    // Holdings on-chain REAIS (mint→qty), somados entre as carteiras do escopo. É a
+    // verdade do que a carteira segura AGORA — corrige lotes fantasma da reconstrução
+    // (posições que o FIFO acha em carteira mas que já foram vendidas/transferidas).
+    const walletRows = await read.wallet.findMany({
+      where: { id: { in: walletIds } },
+      select: { address: true, chain: true },
+    });
+    const onchainQty = new Map<string, number>();
+    if (this.provider.fetchWalletHoldings) {
+      for (const w of walletRows) {
+        try {
+          const hs = await this.provider.fetchWalletHoldings(w.chain, w.address);
+          for (const h of hs)
+            onchainQty.set(h.mint, (onchainQty.get(h.mint) ?? 0) + Number(h.qty));
+        } catch {
+          // best-effort: sem holdings on-chain → cai na quantidade reconstruída
+        }
+      }
+    }
+    const hasOnchain = onchainQty.size > 0;
+
+    // Não-realizado sobre a QUANTIDADE REAL segurada (limitada à porção com base de
+    // custo conhecida = min(real, reconstruído)). Valor realizável (preço Jupiter;
+    // token ilíquido = $0). A porção sem lote (comprada fora da janela) fica de fora.
     let unrealizedUsd = 0;
     let pricedPositions = 0;
+    let heldPositions = 0;
     for (const o of openPositions) {
+      const reconQty = Number(o.qty);
+      if (reconQty <= 0) continue;
+      const realQty = hasOnchain ? (onchainQty.get(o.mint) ?? 0) : reconQty;
+      const coveredQty = Math.min(realQty, reconQty); // porção que AINDA seguramos e temos custo
+      if (coveredQty <= 0) continue; // vendida/transferida → fora do não-realizado
+      heldPositions += 1;
       const snap = snapByMint.get(o.mint);
       const price = snap?.priceUsd != null ? Number(snap.priceUsd) : 0;
       if (price > 0) pricedPositions += 1;
-      const value = Number(o.qty) * price; // 0 se sem preço (token morto)
-      unrealizedUsd += value - Number(o.costUsd);
+      const avgCost = Number(o.costUsd) / reconQty;
+      unrealizedUsd += coveredQty * price - coveredQty * avgCost;
     }
     const unrealized: Unrealized = {
-      available: openPositions.length > 0,
-      unrealizedPnlUsd:
-        openPositions.length > 0 ? unrealizedUsd.toFixed(2) : null,
-      openPositions: openPositions.length,
+      available: heldPositions > 0,
+      unrealizedPnlUsd: heldPositions > 0 ? unrealizedUsd.toFixed(2) : null,
+      openPositions: heldPositions,
       pricedPositions,
     };
 

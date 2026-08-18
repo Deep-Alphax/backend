@@ -270,6 +270,25 @@ describe('computePnl', () => {
     expect(r.profitConcentration.rest.pnlUsd).toBe('0.00');
   });
 
+  it('concentração é POR TOKEN: várias vendas do mesmo token somam num só', () => {
+    // Token A: 2 vendas (realizado 60 + 40 = 100). Token B: 1 venda (30).
+    // Concentração deve ver 2 tokens vencedores (100 e 30), não 3 vendas.
+    const r = computePnl(
+      [
+        buy(2, 1, 0, { mint: 'A', symbol: 'A' }),
+        sell(1, 61, 1, { mint: 'A', symbol: 'A' }), // +60
+        sell(1, 41, 2, { mint: 'A', symbol: 'A' }), // +40 → A = 100
+        buy(1, 1, 3, { mint: 'B', symbol: 'B' }),
+        sell(1, 31, 4, { mint: 'B', symbol: 'B' }), // B = 30
+      ],
+      ALL,
+    );
+    expect(r.profitConcentration.totalUsd).toBe('130.00'); // 100 + 30
+    expect(r.profitConcentration.top3.count).toBe(2); // 2 TOKENS, não 3 vendas
+    expect(r.profitConcentration.top3.pnlUsd).toBe('130.00');
+    expect(r.profitConcentration.closedTrades).toBe(2); // 2 tokens negociados
+  });
+
   it('concentração usa o LUCRO BRUTO (só ganhos): %s não explodem com líquido ~0', () => {
     // 3 ganhos (100+50+30 = 180 bruto) e 2 perdas (−85 cada) → líquido só 10.
     // Antes (÷ líquido) dava %s absurdas (1800%, …); agora ÷ bruto → 0–100%.
@@ -334,6 +353,44 @@ describe('computePnl', () => {
     expect(by.x2_5).toBe(1);
     expect(by.x5_plus).toBe(1);
     expect(r.outcomes).toHaveLength(5);
+  });
+
+  it('desfecho é POR TOKEN: várias vendas do mesmo token contam 1× (múltiplo agregado)', () => {
+    // Token T: compra 2 @1 (custo total 2). Vende 1 @3 (+2) e 1 @0.5 (−0.5).
+    // Agregado: custo 2, realizado +1.5 → múltiplo (2+1.5)/2 = 1.75 → x1_2 (1 token).
+    const r = computePnl(
+      [
+        buy(2, 1, 0, { mint: 'T', symbol: 'T' }),
+        sell(1, 3, 1, { mint: 'T', symbol: 'T' }),
+        sell(1, 0.5, 2, { mint: 'T', symbol: 'T' }),
+      ],
+      ALL,
+    );
+    const by = Object.fromEntries(r.outcomes.map((o) => [o.bucket, o.count]));
+    expect(by.x1_2).toBe(1); // 1 TOKEN, não 2 vendas
+    expect(by.x2_5).toBe(0);
+    expect(by.stop_loss).toBe(0);
+    const x1_2 = r.outcomes.find((o) => o.bucket === 'x1_2')!;
+    expect(x1_2.count).toBe(1);
+    expect(x1_2.pctOfClosed).toBe(100); // único token fechado
+    expect(Number(x1_2.realizedPnlUsd)).toBeCloseTo(1.5, 6);
+  });
+
+  it('desfecho SÓ conta posição TOTALMENTE fechada (vendeu parte e ainda segura → fora)', () => {
+    // Token H: compra 10 @1, vende só 4 @2 → ainda segura 6 lotes → NÃO conta.
+    // Token F: compra 2 @1, vende 2 @1.5 → totalmente fechado (m=1.5) → conta (x1_2).
+    const r = computePnl(
+      [
+        buy(10, 1, 0, { mint: 'H', symbol: 'H' }),
+        sell(4, 2, 1, { mint: 'H', symbol: 'H' }),
+        buy(2, 1, 2, { mint: 'F', symbol: 'F' }),
+        sell(2, 1.5, 3, { mint: 'F', symbol: 'F' }),
+      ],
+      ALL,
+    );
+    const total = r.outcomes.reduce((n, o) => n + o.count, 0);
+    expect(total).toBe(1); // só o F (fechado); o H ainda segurado fica de fora
+    expect(r.outcomes.find((o) => o.bucket === 'x1_2')!.count).toBe(1);
   });
 
   it('curva de capital: acumulado, drawdown e dias no verde', () => {

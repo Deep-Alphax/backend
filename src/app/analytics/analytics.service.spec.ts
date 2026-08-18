@@ -50,7 +50,7 @@ describe('AnalyticsService', () => {
     });
     client.metricSnapshot.findFirst.mockResolvedValue({
       id: 's1',
-      tradesHash: `v4:3:1000:0`,
+      tradesHash: `v9:3:1000:0`,
       data: { totalTrades: 3, cached: true },
     });
 

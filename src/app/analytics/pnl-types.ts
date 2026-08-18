@@ -103,8 +103,12 @@ export interface ProfitConcentration {
 }
 
 /**
- * Desfecho de cada posição fechada pelo MÚLTIPLO realizado (preço de venda ÷
- * custo médio dos lotes casados). rugpull/stop_loss são heurísticos por
+ * Desfecho por TOKEN (agregado, não por venda — igual à Axiom) classificado pelo
+ * MÚLTIPLO realizado = proceeds ÷ base de custo casada (= 1 + PnL/custo). Um token
+ * conta UMA vez (soma de todas as vendas casadas no período). Só posições
+ * TOTALMENTE FECHADAS entram (sem lotes de compra restantes no FIFO) — um token que
+ * você vendeu só em parte e ainda segura não "terminou". Tokens sem base de custo
+ * (só windfall/airdrop) ficam de fora. rugpull/stop_loss são heurísticos por
  * severidade da perda (não há detecção on-chain de rug aqui):
  *   rugpull  multiple < 0.1  (perdeu ≥ 90%)
  *   stop_loss 0.1 ≤ m < 1

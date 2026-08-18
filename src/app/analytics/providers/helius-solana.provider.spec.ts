@@ -8,6 +8,24 @@ const MANLET = 'MANLETmint1111111111111111111111111111111111';
 
 const secs = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 
+/**
+ * Prisma stub para os testes: cache de preços/dia SEMPRE vazio (miss) → o provider
+ * cai no caminho de rede (CoinGecko/DexScreener/Jupiter), que é o que os testes
+ * exercitam. `upsert`/`createMany` são no-ops resolvidos.
+ */
+function prismaMock(): any {
+  const empty = { findMany: async () => [] };
+  const read = { tokenPrice: empty, solDayPrice: empty };
+  const write = {
+    tokenPrice: { upsert: async () => ({}) },
+    solDayPrice: { createMany: async () => ({}) },
+  };
+  return {
+    getReadClient: () => read,
+    getWriteClient: () => write,
+  };
+}
+
 function makeProvider(txs: any[]) {
   // Roteia por URL: transações do Helius, preço do SOL/dia do CoinGecko, DexScreener.
   // CoinGecko: 190 em 2026-08-10, 200 em 2026-08-11 (ponto ao meio-dia de cada).
@@ -30,7 +48,7 @@ function makeProvider(txs: any[]) {
   const config: any = {
     get: (k: string) => (k === 'HELIUS_API_KEY' ? 'key' : undefined),
   };
-  const provider = new HeliusSolanaProvider(config, http);
+  const provider = new HeliusSolanaProvider(config, http, prismaMock());
   return { provider, http };
 }
 
@@ -118,7 +136,7 @@ describe('HeliusSolanaProvider', () => {
   it('sem HELIUS_API_KEY lança erro transitório (status 401)', async () => {
     const http: any = { get: jest.fn() };
     const config: any = { get: () => undefined };
-    const provider = new HeliusSolanaProvider(config, http);
+    const provider = new HeliusSolanaProvider(config, http, prismaMock());
     await expect(
       provider.fetchSwaps({ chain: Chain.SOLANA, address: A }),
     ).rejects.toMatchObject({ status: 401 });
@@ -232,7 +250,7 @@ describe('HeliusSolanaProvider', () => {
       }),
     };
     const config: any = { get: () => undefined };
-    const provider = new HeliusSolanaProvider(config, http);
+    const provider = new HeliusSolanaProvider(config, http, prismaMock());
 
     const snaps = await provider.fetchTokenSnapshots(Chain.SOLANA, [
       MANLET,

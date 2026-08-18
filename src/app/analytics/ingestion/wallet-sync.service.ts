@@ -1,9 +1,12 @@
 import { Injectable, Inject, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Prisma, SyncStatus, Wallet } from '@prisma/client';
+import { ChainType, Prisma, SwapSource, SyncStatus, Wallet } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { chainTypeOf } from '../../wallets/wallet-address.util';
 import {
+  FetchSwapsResult,
   MARKET_DATA_PROVIDER,
   MarketDataProvider,
   ProviderSwap,
@@ -77,14 +80,49 @@ export class WalletSyncService {
   private static readonly STALE_MS =
     Number(process.env.WALLET_STALE_MS) || 24 * 60 * 60 * 1000;
 
+  /**
+   * Janela do backfill: NÃO puxamos histórico além disto (o dashboard é D30). Piso de
+   * data aplicado ao provider → ele para de paginar ao cruzar a fronteira. Corta
+   * drasticamente páginas/custo em carteiras antigas. Configurável por env; default 30d.
+   */
+  private static readonly BACKFILL_WINDOW_MS =
+    Number(process.env.WALLET_BACKFILL_WINDOW_MS) || 30 * 24 * 60 * 60 * 1000;
+
   /** Evita sobreposição de execuções do cron (tick lento não empilha). */
   private running = false;
+
+  /**
+   * Teto de lotes ao rodar o backfill "até completar" (via `ensureFresh`, disparo
+   * imediato ao catalogar). Cada lote = MAX_PAGES_PER_RUN páginas → 500 × 20 × 100
+   * ≈ 1M swaps. Só uma trava anti-loop; carteiras reais terminam MUITO antes.
+   */
+  private static readonly MAX_BACKFILL_BATCHES = 500;
+  /**
+   * Backfills completos SIMULTÂNEOS (disparo imediato). Protege o rate limit/custo
+   * do provider quando várias carteiras são adicionadas de uma vez — o excedente
+   * roda 1 lote e cai no cron p/ continuar. O cron segue como rede de segurança.
+   */
+  private static readonly MAX_CONCURRENT_BACKFILLS = 2;
+  private activeBackfills = 0;
 
   constructor(
     private readonly prisma: PrismaService,
     @Inject(MARKET_DATA_PROVIDER) private readonly provider: MarketDataProvider,
     private readonly events: EventEmitter2,
+    private readonly config: ConfigService,
   ) {}
+
+  /**
+   * Fonte de swaps default (sem pin) para uma chain: EVM→Moralis; Solana→Birdeye
+   * quando há `BIRDEYE_API_KEY`, senão Helius. É só o PALPITE inicial — o 1º sync
+   * pina a fonte de fato (com fallback Birdeye→Helius se o Birdeye falhar).
+   */
+  private defaultSource(chain: Wallet['chain']): SwapSource {
+    if (chainTypeOf(chain) !== ChainType.SOLANA) return SwapSource.MORALIS;
+    return this.config.get<string>('BIRDEYE_API_KEY')
+      ? SwapSource.BIRDEYE
+      : SwapSource.HELIUS;
+  }
 
   @Cron(CronExpression.EVERY_MINUTE)
   async drainPending(): Promise<void> {
@@ -109,7 +147,9 @@ export class WalletSyncService {
         take: WalletSyncService.BATCH_PER_TICK,
       });
       for (const wallet of pending) {
-        await this.syncWallet(wallet).catch((err) =>
+        // Roda até completar (sem o gap de 1 min entre lotes) — o limite de
+        // concorrência interno protege o provider; o resto cai no próximo tick.
+        await this.runToCompletion(wallet).catch((err) =>
           this.logger.error(
             `Sync falhou p/ wallet ${wallet.id}: ${err?.message}`,
           ),
@@ -129,40 +169,85 @@ export class WalletSyncService {
     });
 
     try {
-      // Dois modos:
-      //  - BACKFILL (histórico completo): quando há cursor pendente OU nunca houve
-      //    sync completa (lastSyncedAt=null). Pagina TODO o histórico, sem filtro de
-      //    data, em lotes de MAX_PAGES_PER_RUN por tick (o cron continua enquanto
-      //    sobrar cursor). lastSyncedAt só é gravado ao TERMINAR o backfill.
-      //  - INCREMENTAL: após backfill completo (cursor=null, lastSyncedAt setado),
-      //    busca só o que é novo desde lastSyncedAt.
+      // Dois modos, ambos LIMITADOS à janela de BACKFILL_WINDOW_MS (30 dias):
+      //  - BACKFILL: cursor pendente OU nunca sincronizou. Pagina do mais novo p/ o
+      //    mais antigo até cruzar o piso da janela — não puxa histórico além disso.
+      //  - INCREMENTAL: após backfill (lastSyncedAt setado), busca só o novo desde então.
+      // O piso efetivo é o MAIS RECENTE entre (30d atrás) e lastSyncedAt: nunca puxamos
+      // mais que 30 dias, e num refresh só o delta desde o último sync.
+      const windowFloor = new Date(Date.now() - WalletSyncService.BACKFILL_WINDOW_MS);
       const resumingBackfill = wallet.syncCursor != null;
-      const sinceBlockTime =
-        !resumingBackfill && wallet.lastSyncedAt ? wallet.lastSyncedAt : null;
+      const sinceBlockTime = new Date(
+        Math.max(windowFloor.getTime(), wallet.lastSyncedAt?.getTime() ?? 0),
+      );
 
       let cursor: string | null = wallet.syncCursor ?? null;
       let pages = 0;
       let inserted = 0;
       let minBlockTime: Date | null = null;
 
+      // Fonte PINADA (imutável) ou o palpite default do 1º sync. Nunca mistura
+      // fontes na mesma carteira (evita a mesma tx virar linhas duplicadas).
+      const pinnedSource = wallet.syncSource;
+      let source = pinnedSource ?? this.defaultSource(wallet.chain);
+
       const mode = resumingBackfill
         ? 'backfill(resume)'
-        : sinceBlockTime
+        : wallet.lastSyncedAt
           ? 'incremental'
-          : 'backfill(full)';
+          : 'backfill(window)';
       this.logger.log(
         `Sync START wallet ${wallet.id} (${wallet.chain}) addr=${wallet.address} ` +
-          `modo=${mode} sinceBlockTime=${sinceBlockTime?.toISOString() ?? 'null'} cursor=${cursor ? 'sim' : 'não'}`,
+          `modo=${mode} fonte=${source}${pinnedSource ? '(pin)' : ''} ` +
+          `sinceBlockTime=${sinceBlockTime?.toISOString() ?? 'null'} cursor=${cursor ? 'sim' : 'não'}`,
       );
 
       do {
-        const { swaps, nextCursor } = await this.provider.fetchSwaps({
-          chain: wallet.chain,
-          address: wallet.address,
-          cursor,
-          sinceBlockTime,
-          limit: WalletSyncService.PAGE_SIZE,
-        });
+        let result: FetchSwapsResult;
+        try {
+          result = await this.provider.fetchSwaps({
+            chain: wallet.chain,
+            address: wallet.address,
+            source,
+            cursor,
+            sinceBlockTime,
+            limit: WalletSyncService.PAGE_SIZE,
+          });
+        } catch (err) {
+          // Fallback SÓ no 1º sync (sem pin), na 1ª página, Birdeye→Helius. Depois
+          // de pinada, a fonte não troca — o erro sobe e o cron retenta a mesma.
+          if (
+            !pinnedSource &&
+            pages === 0 &&
+            cursor == null &&
+            source === SwapSource.BIRDEYE
+          ) {
+            this.logger.warn(
+              `Birdeye falhou no 1º sync de ${wallet.id} → fallback p/ Helius: ${(err as Error)?.message}`,
+            );
+            source = SwapSource.HELIUS;
+            result = await this.provider.fetchSwaps({
+              chain: wallet.chain,
+              address: wallet.address,
+              source,
+              cursor,
+              sinceBlockTime,
+              limit: WalletSyncService.PAGE_SIZE,
+            });
+          } else {
+            throw err;
+          }
+        }
+
+        // Pina a fonte na 1ª página bem-sucedida do 1º sync (imutável daqui pra frente).
+        if (!pinnedSource && pages === 0) {
+          await write.wallet.update({
+            where: { id: wallet.id },
+            data: { syncSource: source },
+          });
+        }
+
+        const { swaps, nextCursor } = result;
 
         let insertedThisPage = 0;
         if (swaps.length > 0) {
@@ -368,12 +453,48 @@ export class WalletSyncService {
       Date.now() - w.lastSyncedAt.getTime() > WalletSyncService.STALE_MS;
     if (!neverSynced && !stale) return false;
 
-    void this.syncWallet(w).catch((e) =>
+    void this.runToCompletion(w).catch((e) =>
       this.logger.warn(
         `ensureFresh sync falhou p/ wallet ${walletId}: ${e?.message}`,
       ),
     );
     return true;
+  }
+
+  /**
+   * Roda o backfill de UMA carteira ATÉ COMPLETAR (lotes de MAX_PAGES_PER_RUN em
+   * sequência, sem o gap de 1 min do cron) — a carteira recém-adicionada sincroniza
+   * o mais rápido que o provider permitir. Reusa `syncWallet` (persist/estado/eventos/
+   * retry). Para quando o status sai de PENDING (SYNCED/ERROR), a carteira é
+   * desativada, ou o teto de lotes é atingido.
+   *
+   * Concorrência limitada (`MAX_CONCURRENT_BACKFILLS`): acima do teto, roda só 1 lote
+   * e deixa o cron continuar — protege o custo/rate limit do provider. O cron
+   * (`drainPending`) segue como rede de segurança (retoma PENDING órfão pós-restart).
+   */
+  private async runToCompletion(wallet: Wallet): Promise<void> {
+    // Acima do teto de concorrência → 1 lote e sai (o cron drena o resto).
+    if (this.activeBackfills >= WalletSyncService.MAX_CONCURRENT_BACKFILLS) {
+      await this.syncWallet(wallet);
+      return;
+    }
+    this.activeBackfills += 1;
+    try {
+      let current: Wallet | null = wallet;
+      for (let i = 0; i < WalletSyncService.MAX_BACKFILL_BATCHES && current; i++) {
+        await this.syncWallet(current);
+        const fresh = await this.prisma
+          .getReadClient()
+          .wallet.findUnique({ where: { id: wallet.id } });
+        // Continua só enquanto ainda há backfill pendente desta carteira.
+        current =
+          fresh && fresh.isActive && fresh.syncStatus === SyncStatus.PENDING
+            ? fresh
+            : null;
+      }
+    } finally {
+      this.activeBackfills -= 1;
+    }
   }
 
   /** userIds de todos os usuários que catalogam a carteira (fan-out compartilhado). */

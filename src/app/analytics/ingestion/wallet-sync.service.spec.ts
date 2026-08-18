@@ -22,8 +22,10 @@ function makeService() {
   };
   const provider: any = { fetchSwaps: jest.fn() };
   const events: any = { emit: jest.fn() };
+  // Sem BIRDEYE_API_KEY → fonte default = HELIUS (reconstrução), como no fallback.
+  const config: any = { get: () => undefined };
   return {
-    service: new WalletSyncService(prisma, provider, events),
+    service: new WalletSyncService(prisma, provider, events, config),
     client,
     provider,
     events,
@@ -253,9 +255,10 @@ describe('WalletSyncService', () => {
     );
   });
 
-  it('INCREMENTAL: passa sinceBlockTime=lastSyncedAt quando já sincronizou (cursor null)', async () => {
+  it('INCREMENTAL: quando lastSyncedAt é mais recente que a janela, usa lastSyncedAt como piso', async () => {
     const { service, provider } = makeService();
-    const lastSyncedAt = new Date('2026-07-01T00:00:00Z');
+    // Dentro da janela de 30d → o piso efetivo é o próprio lastSyncedAt (delta).
+    const lastSyncedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
     provider.fetchSwaps.mockResolvedValueOnce({ swaps: [], nextCursor: null });
     await service.syncWallet({ ...wallet, lastSyncedAt, syncCursor: null });
     expect(provider.fetchSwaps.mock.calls[0][0].sinceBlockTime).toEqual(
@@ -263,16 +266,21 @@ describe('WalletSyncService', () => {
     );
   });
 
-  it('BACKFILL: NÃO filtra por data ao retomar (syncCursor setado) e continua do cursor', async () => {
+  it('BACKFILL: SEMPRE limita à janela de 30d (piso), mesmo retomando do cursor', async () => {
     const { service, provider } = makeService();
     provider.fetchSwaps.mockResolvedValueOnce({ swaps: [], nextCursor: null });
+    // lastSyncedAt bem antigo → o piso vira a janela de 30d (não puxa além disso).
+    const before = Date.now() - 30 * 24 * 60 * 60 * 1000;
     await service.syncWallet({
       ...wallet,
-      lastSyncedAt: new Date('2026-07-01Z'),
+      lastSyncedAt: new Date('2026-07-01T00:00:00Z'),
       syncCursor: 'cur-123',
     });
+    const after = Date.now() - 30 * 24 * 60 * 60 * 1000;
     const arg = provider.fetchSwaps.mock.calls[0][0];
-    expect(arg.sinceBlockTime).toBeNull();
+    // Piso ≈ agora−30d (tolera o tempo decorrido no teste).
+    expect(arg.sinceBlockTime.getTime()).toBeGreaterThanOrEqual(before);
+    expect(arg.sinceBlockTime.getTime()).toBeLessThanOrEqual(after);
     expect(arg.cursor).toBe('cur-123');
   });
 
