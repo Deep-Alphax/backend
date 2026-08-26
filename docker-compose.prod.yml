@@ -15,6 +15,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # gmgn-cli (varredura de sidewallets do Wallet Reader). Nome do pacote npm;
+        # vazio (default) = NÃO instala. Defina GMGN_CLI_PACKAGE no .env p/ ativar.
+        # Só afeta builds locais/CI que usam este compose (a imagem do GHCR precisa
+        # ter sido buildada com o mesmo arg). Auth do CLI vai por env em runtime.
+        GMGN_CLI_PACKAGE: ${GMGN_CLI_PACKAGE:-}
     # Imagem publicada pelo CI no GHCR. O servidor faz `pull` desta ref (não builda).
     # IMAGE_TAG é injetado pelo deploy (SHA do commit); default `latest` p/ uso manual.
     image: ghcr.io/deep-alphax/backend:${IMAGE_TAG:-latest}

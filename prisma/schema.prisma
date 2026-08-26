@@ -227,6 +227,23 @@ enum TradeSide {
 }
 
 // Um swap normalizado (uma perna base<->quote). Idempotente por (wallet, tx, mint, side).
+/**
+ * Resultado de uma varredura de sidewallets/copytraders do Wallet Reader (por KOL).
+ * Cacheado — o front lê os últimos scans; rodar de novo faz upsert.
+ */
+model WalletScan {
+  kolId          String   @id
+  kolName        String
+  scannedAt      DateTime
+  status         String // "complete" | "error"
+  publicWallet   String
+  tokensAnalyzed Int      @default(0)
+  apiCalls       Int      @default(0)
+  flagged        Json // ScanFlagged[]
+  summary        String   @db.Text
+  updatedAt      DateTime @updatedAt
+}
+
 model Trade {
   id       String @id @default(cuid())
   walletId String
@@ -491,6 +508,8 @@ model CapturedMessage {
   monitor   DiscordMonitor? @relation(fields: [monitorId], references: [id], onDelete: SetNull)
 
   guildName        String?
+  guildId          String? // snowflake do servidor (p/ montar a URL do ícone)
+  guildIconUrl     String? // URL do ícone do servidor (CDN do Discord), quando houver
   channelId        String
   channelName      String?
   authorTag        String?

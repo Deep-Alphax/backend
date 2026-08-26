@@ -37,6 +37,16 @@ ENV NODE_ENV=production
 # Timezone e openssl para o Prisma. tini = init leve p/ sinais (SIGTERM) corretos.
 RUN apk add --no-cache openssl libc6-compat tini && corepack enable
 
+# gmgn-cli — varredura de sidewallets do Wallet Reader (OPCIONAL).
+# Passe o pacote no build p/ instalar globalmente:
+#   docker build --build-arg GMGN_CLI_PACKAGE=<pacote-npm-do-gmgn-cli> ...
+# Vazio (default) = NÃO instala; o endpoint de scan retorna um erro amigável até
+# o CLI existir (o resto do Wallet Reader funciona normal).
+# AUTENTICAÇÃO: forneça em RUNTIME (env var ou arquivo de config montado em
+# volume) — NUNCA embuta credenciais na imagem.
+ARG GMGN_CLI_PACKAGE=""
+RUN if [ -n "$GMGN_CLI_PACKAGE" ]; then npm i -g "$GMGN_CLI_PACKAGE"; fi
+
 # node_modules vindos do build (inclui Prisma Client gerado + CLI do Prisma).
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

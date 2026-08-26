@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "scans": {
+    "1717fa167c": {
+      "kolId": "1717fa167c",
+      "kolName": "Cupsey",
+      "scannedAt": 1787373056576,
+      "status": "complete",
+      "publicWallet": "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f",
+      "tokensAnalyzed": 5,
+      "apiCalls": 8,
+      "flagged": [],
+      "summary": "Analisou os últimos 5 tokens de Cupsey contra as outras 496 carteiras do índice: 0 sidewallets confirmadas (0 com link direto on-chain, 0 por padrão comportamental repetido) e 0 copytraders identificados. Coincidências de compra isolada (sem confirmação) foram descartadas."
+    },
+    "8350df09bc": {
+      "kolId": "8350df09bc",
+      "kolName": "SVR",
+      "scannedAt": 1787373732945,
+      "status": "complete",
+      "publicWallet": "DyaEj1nZS9qtkW4b3TkyuQii68wKBZmZ3p94AEJcHXkr",
+      "tokensAnalyzed": 5,
+      "apiCalls": 8,
+      "flagged": [
+        {
+          "address": "7NAd2EpYGGeFofpyvgehSXhH5vg6Ry6VRMW2Y6jiqCu1",
+          "name": "Cupsey2",
+          "ownerKolId": "1717fa167c",
+          "ownerKolName": "Cupsey",
+          "role": "copytrader",
+          "confidence": "info",
+          "recognizedElsewhere": false,
+          "recognizedAs": null,
+          "signals": [
+            "copytrade"
+          ],
+          "reason": "Comprou KURUMI 20 min DEPOIS da carteira pública — copytrader normal, não sidewallet.",
+          "evidence": [
+            {
+              "type": "copytrade",
+              "token": "KURUMI",
+              "tokenAddress": "529E7VHdEyEo6a89SDpcZRF6VqsZaDyw8E5TeMSiBAGS",
+              "candidateBuyAt": 1767060622,
+              "kolBuyAt": 1767059430,
+              "deltaSeconds": 1192
+            }
+          ]
+        },
+        {
+          "address": "8VVRub7ps3ha88rpAJF5nZ6LdcxX7XwsBwzkRyZ9dND8",
+          "name": "64New",
+          "ownerKolId": "c66c65175f",
+          "ownerKolName": "64",
+          "role": "copytrader",
+          "confidence": "info",
+          "recognizedElsewhere": false,
+          "recognizedAs": null,
+          "signals": [
+            "copytrade"
+          ],
+          "reason": "Comprou KURUMI 6 min DEPOIS da carteira pública — copytrader normal, não sidewallet.",
+          "evidence": [
+            {
+              "type": "copytrade",
+              "token": "KURUMI",
+              "tokenAddress": "529E7VHdEyEo6a89SDpcZRF6VqsZaDyw8E5TeMSiBAGS",
+              "candidateBuyAt": 1767059792,
+              "kolBuyAt": 1767059430,
+              "deltaSeconds": 362
+            }
+          ]
+        }
+      ],
+      "summary": "Analisou os últimos 5 tokens de SVR contra as outras 487 carteiras do índice: 0 sidewallets confirmadas (0 com link direto on-chain, 0 por padrão comportamental repetido) e 2 copytraders identificados. Coincidências de compra isolada (sem confirmação) foram descartadas."
+    }
+  }
+}

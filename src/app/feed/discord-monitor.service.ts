@@ -360,12 +360,24 @@ export class DiscordMonitorService implements OnModuleInit, OnModuleDestroy {
     const embed = this.serializeEmbeds(target);
     const html = formatForTelegram(target as MessageLike, origin);
 
+    // Ícone do servidor: montado do hash on-chain do Discord (determinístico).
+    // `a_` = animado → .gif. Sem hash → null (cai na inicial no front).
+    const guild = message.guild;
+    const guildId = guild?.id ? String(guild.id) : null;
+    let guildIconUrl: string | null = null;
+    if (guild?.icon && guildId) {
+      const ext = String(guild.icon).startsWith('a_') ? 'gif' : 'png';
+      guildIconUrl = `https://cdn.discordapp.com/icons/${guildId}/${guild.icon}.${ext}?size=64`;
+    }
+
     const sent = await this.telegram.sendMessage(monitor.telegramChatId, html);
 
     try {
       await this.feed.create({
         monitorId: monitor.id,
         guildName: origin.guildName,
+        guildId,
+        guildIconUrl,
         channelId: origin.channelId,
         channelName: origin.channelName,
         authorTag: origin.authorTag,
