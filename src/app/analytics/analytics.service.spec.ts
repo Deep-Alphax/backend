@@ -50,7 +50,7 @@ describe('AnalyticsService', () => {
     });
     client.metricSnapshot.findFirst.mockResolvedValue({
       id: 's1',
-      tradesHash: `v9:3:1000:0`,
+      tradesHash: `v10:3:1000:0`,
       data: { totalTrades: 3, cached: true },
     });
 
@@ -78,7 +78,8 @@ describe('AnalyticsService', () => {
     });
     client.trade.findMany.mockResolvedValue([
       {
-        blockTime: new Date('2026-07-20T10:00:00Z'),
+        // Recente (dentro de qualquer janela) — evita test time-bomb ao passar D30.
+        blockTime: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
         side: TradeSide.BUY,
         baseMint: 'TOK',
         baseSymbol: 'TOK',

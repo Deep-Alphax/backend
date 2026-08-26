@@ -81,6 +81,9 @@ export interface WinRate {
   winners: number; // PnL de trading > 0
   losers: number; // PnL de trading < 0
   winRatePct: number;
+  avgWinUsd: string; // PnL de trading médio das vendas vencedoras (≥ 0)
+  avgLossUsd: string; // PnL de trading médio das vendas perdedoras (≤ 0)
+  winLossRatio: number | null; // ganho médio ÷ |perda média|; null se sem perdas
 }
 
 /**

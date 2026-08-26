@@ -255,7 +255,8 @@ export class AnalyticsService {
     // por venda (um token conta 1×, como na Axiom).
     // v8: desfechos contam só posições TOTALMENTE FECHADAS (sem lotes restantes).
     // v9: concentração do lucro agora é POR TOKEN (antes por venda).
-    const tradesHash = `v9:${agg._count._all}:${agg._max.createdAt?.getTime() ?? 0}:${tzOffsetMinutes}`;
+    // v10: winRate ganhou avgWinUsd/avgLossUsd/winLossRatio (tooltip Taxa de acerto).
+    const tradesHash = `v10:${agg._count._all}:${agg._max.createdAt?.getTime() ?? 0}:${tzOffsetMinutes}`;
 
     const cached = await read.metricSnapshot.findFirst({
       where: { userId, walletId, scope, period },

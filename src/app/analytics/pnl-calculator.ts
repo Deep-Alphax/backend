@@ -432,17 +432,33 @@ export function computePnl(trades: TradeInput[], opts: PnlOptions): PnlResult {
   // ── Win rate (posições fechadas: vendas casadas) ──
   let winners = 0;
   let losers = 0;
+  let winSum = ZERO; // Σ PnL de trading das vencedoras
+  let lossSum = ZERO; // Σ PnL de trading das perdedoras (≤ 0)
   for (const s of closedSells) {
-    if (s.tradingPnl.gt(0)) winners += 1;
-    else if (s.tradingPnl.lt(0)) losers += 1;
+    if (s.tradingPnl.gt(0)) {
+      winners += 1;
+      winSum = winSum.plus(s.tradingPnl);
+    } else if (s.tradingPnl.lt(0)) {
+      losers += 1;
+      lossSum = lossSum.plus(s.tradingPnl);
+    }
   }
   const decided = winners + losers;
+  const avgWin = winners > 0 ? winSum.div(winners) : ZERO;
+  const avgLoss = losers > 0 ? lossSum.div(losers) : ZERO; // ≤ 0
   const winRate: WinRate = {
     closed: closedSells.length,
     winners,
     losers,
     winRatePct:
       decided > 0 ? Number(((winners / decided) * 100).toFixed(2)) : 0,
+    avgWinUsd: avgWin.toFixed(2),
+    avgLossUsd: avgLoss.toFixed(2),
+    // Razão ganho/perda = ganho médio ÷ |perda média| (null se não há perdas).
+    winLossRatio:
+      losers > 0 && avgLoss.abs().gt(0)
+        ? Number(avgWin.div(avgLoss.abs()).toFixed(2))
+        : null,
   };
 
   // ── Concentração do LUCRO BRUTO: quanto dos GANHOS vem dos melhores TOKENS. ──
