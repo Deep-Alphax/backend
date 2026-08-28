@@ -43,8 +43,18 @@ const BIRDEYE_PAGE = 50;
  */
 const MAX_ATTEMPTS = 3;
 
-/** Teto de candidatos verificados — cada um custa uma chamada Birdeye. */
-const MAX_CANDIDATES = 10;
+/**
+ * Teto de candidatos verificados. Cada um custa ~1,1s de Birdeye, mas a
+ * varredura roda em FILA — quem pediu não fica esperando —, então vale ser
+ * generoso: no Eddy foram 35 candidatos e 10 cortava demais.
+ */
+const MAX_CANDIDATES = 25;
+
+/**
+ * Acima disto, o endereço negocia tokens demais para ser carteira pessoal —
+ * é bot, roteador de DEX ou saque de corretora. Filtro anti-ruído da descoberta.
+ */
+const INFRA_DISTINCT_MINTS = 25;
 
 /**
  * Validade de um scan. O resultado de um KOL do preset é IGUAL para todos os
@@ -67,7 +77,7 @@ const HISTORY_TTL_MS = 7 * 24 * 3600 * 1000;
  * classifica o achado sozinho; a verificação só ENRIQUECE com o padrão temporal.
  * Estourou o tempo, devolve o que tem em vez de deixar a UI pendurada.
  */
-const VERIFY_BUDGET_MS = 8000;
+const VERIFY_BUDGET_MS = 30_000;
 
 /** Quantas transações recentes da carteira pública o Helius devolve por vez. */
 const HELIUS_TX_LIMIT = 100;
@@ -123,6 +133,12 @@ export interface ScanResult {
 
 interface Finding {
   address: string;
+  /** Já cadastrado no índice? `false` = endereço DESCOBERTO agora. */
+  known: boolean;
+  /** Passou pela checagem temporal (só os candidatos melhor ranqueados passam). */
+  verified: boolean;
+  /** Nº de tokens analisados que este endereço também negociou. */
+  sharedTokens: number;
   name: string | null;
   ownerKolId: string | null;
   ownerKolName: string | null;
@@ -185,9 +201,9 @@ export class WalletReaderService implements OnModuleInit {
     try {
       const pending = await this.prisma.getReadClient().walletScan.findMany({
         where: { status: { in: ['queued', 'running'] } },
-        select: { kolId: true },
+        select: { kolId: true, publicWallet: true },
       });
-      pending.forEach((r) => this.enqueue(r.kolId));
+      pending.forEach((r) => this.enqueue(r.kolId, r.publicWallet));
       if (pending.length) {
         this.logger.log(`Reenfileiradas ${pending.length} varreduras pendentes.`);
       }
@@ -204,7 +220,10 @@ export class WalletReaderService implements OnModuleInit {
    * `flagged` de 276 KOLs aqui seria centenas de KB que quase ninguém olha.
    */
   async getScanSummaries(): Promise<{ scans: Record<string, ScanSummary> }> {
+    // Um KOL pode ter uma varredura por carteira; a listagem mostra a mais
+    // recente — é o que a rail usa para saber quem já foi varrido.
     const rows = await this.prisma.getReadClient().walletScan.findMany({
+      orderBy: { scannedAt: 'asc' },
       select: {
         kolId: true,
         kolName: true,
@@ -232,13 +251,16 @@ export class WalletReaderService implements OnModuleInit {
     return { scans };
   }
 
-  /** Resultado COMPLETO de um scan (com as evidências) — sob demanda. */
-  async getScan(kolId: string): Promise<ScanResult> {
-    const row = await this.prisma
-      .getReadClient()
-      .walletScan.findUnique({ where: { kolId } });
-    if (!row) throw new NotFoundException('Sem varredura para este KOL');
-    return this.toResult(row);
+  /**
+   * TODAS as varreduras de um KOL — uma por carteira já varrida, com as
+   * evidências. O modal escolhe qual carteira mostrar.
+   */
+  async getScansOf(kolId: string): Promise<ScanResult[]> {
+    const rows = await this.prisma.getReadClient().walletScan.findMany({
+      where: { kolId },
+      orderBy: { scannedAt: 'desc' },
+    });
+    return rows.map((r) => this.toResult(r));
   }
 
   // ── item 4: poda do cache on-chain ─────────────────────────────────────────
@@ -597,15 +619,16 @@ export class WalletReaderService implements OnModuleInit {
       kolName: result.kolName,
       scannedAt: new Date(result.scannedAt),
       status: result.status,
-      publicWallet: result.publicWallet,
       tokensAnalyzed: result.tokensAnalyzed,
       apiCalls: result.apiCalls,
       flagged: result.flagged as unknown as Prisma.InputJsonValue,
       summary: result.summary,
     };
     await this.prisma.getWriteClient().walletScan.upsert({
-      where: { kolId: result.kolId },
-      create: { kolId: result.kolId, ...data },
+      where: {
+        kolId_publicWallet: { kolId: result.kolId, publicWallet: result.publicWallet },
+      },
+      create: { kolId: result.kolId, publicWallet: result.publicWallet, ...data },
       update: data,
     });
     return result;
@@ -627,10 +650,18 @@ export class WalletReaderService implements OnModuleInit {
   }
 
   /** Marca o estado de uma varredura sem reescrever o resultado inteiro. */
-  private async markStatus(kolId: string, status: string, summary: string): Promise<void> {
+  private async markStatus(
+    kolId: string,
+    address: string,
+    status: string,
+    summary: string,
+  ): Promise<void> {
     await this.prisma
       .getWriteClient()
-      .walletScan.updateMany({ where: { kolId }, data: { status, summary } })
+      .walletScan.updateMany({
+        where: { kolId, publicWallet: address },
+        data: { status, summary },
+      })
       .catch(() => undefined);
   }
 
@@ -665,7 +696,11 @@ export class WalletReaderService implements OnModuleInit {
    * Devolve o scan em cache se ainda vale, o estado atual se já está na fila, ou
    * enfileira e volta como `queued`. O resultado final chega por socket.
    */
-  async requestScan(kolId: string, force = false): Promise<ScanResult> {
+  async requestScan(
+    kolId: string,
+    address?: string,
+    force = false,
+  ): Promise<ScanResult> {
     const preset = await this.prisma.getReadClient().kolPreset.findFirst({
       where: { id: kolId, deletedAt: null },
       select: { id: true, name: true, wallets: true },
@@ -676,9 +711,20 @@ export class WalletReaderService implements OnModuleInit {
       : [];
     if (!wallets.length) throw new NotFoundException('KOL sem carteiras: ' + kolId);
 
+    // A carteira é ESCOLHIDA por quem pede; sem escolha, a primeira. Só aceita
+    // endereço que pertence a este KOL — senão viraria varredura arbitrária.
+    const target = address
+      ? wallets.find((w) => w.address === address)
+      : wallets[0];
+    if (!target) {
+      throw new NotFoundException('Carteira não pertence a este KOL: ' + address);
+    }
+
     const existing = await this.prisma
       .getReadClient()
-      .walletScan.findUnique({ where: { kolId } });
+      .walletScan.findUnique({
+        where: { kolId_publicWallet: { kolId, publicWallet: target.address } },
+      });
     if (existing) {
       const state = this.toResult(existing);
       // Já em andamento: não duplica trabalho.
@@ -698,18 +744,20 @@ export class WalletReaderService implements OnModuleInit {
       kolName: preset.name,
       scannedAt: Date.now(),
       status: 'queued',
-      publicWallet: wallets[0].address,
+      publicWallet: target.address,
       tokensAnalyzed: 0,
       apiCalls: 0,
       flagged: [],
       summary: 'Varredura na fila — o resultado chega assim que terminar.',
     });
-    this.enqueue(kolId);
+    this.enqueue(kolId, target.address);
     return queued;
   }
 
-  private enqueue(kolId: string): void {
-    if (!this.queue.includes(kolId)) this.queue.push(kolId);
+  /** A fila guarda o PAR: um KOL pode ter uma varredura por carteira. */
+  private enqueue(kolId: string, address: string): void {
+    const job = `${kolId}|${address}`;
+    if (!this.queue.includes(job)) this.queue.push(job);
     void this.drain();
   }
 
@@ -719,20 +767,26 @@ export class WalletReaderService implements OnModuleInit {
     this.draining = true;
     try {
       while (this.queue.length) {
-        const kolId = this.queue.shift()!;
-        const attempt = (this.attempts.get(kolId) ?? 0) + 1;
-        this.attempts.set(kolId, attempt);
+        const job = this.queue.shift()!;
+        const [kolId, address] = job.split('|');
+        const attempt = (this.attempts.get(job) ?? 0) + 1;
+        this.attempts.set(job, attempt);
 
         let result: ScanResult;
         try {
-          await this.markStatus(kolId, 'running', 'Varredura em andamento…');
-          result = await this.scanKol(kolId);
+          await this.markStatus(kolId, address, 'running', 'Varredura em andamento…');
+          result = await this.scanKol(kolId, address);
         } catch (e: any) {
           // Erro de DOMÍNIO (KOL saiu do preset, ficou sem carteira): tentar de
           // novo não muda nada. Encerra aqui.
-          this.attempts.delete(kolId);
-          this.logger.warn(`Varredura de ${kolId} abortada: ${e?.message}`);
-          await this.markStatus(kolId, 'error', `Varredura não pôde rodar: ${e?.message}`);
+          this.attempts.delete(job);
+          this.logger.warn(`Varredura de ${job} abortada: ${e?.message}`);
+          await this.markStatus(
+            kolId,
+            address,
+            'error',
+            `Varredura não pôde rodar: ${e?.message}`,
+          );
           continue;
         }
 
@@ -741,19 +795,20 @@ export class WalletReaderService implements OnModuleInit {
         if (result.status === 'error' && attempt < MAX_ATTEMPTS) {
           const wait = this.backoffMs(attempt);
           this.logger.warn(
-            `Varredura de ${kolId} falhou (tentativa ${attempt}/${MAX_ATTEMPTS}); repetindo em ${wait}ms.`,
+            `Varredura de ${job} falhou (tentativa ${attempt}/${MAX_ATTEMPTS}); repetindo em ${wait}ms.`,
           );
           await this.markStatus(
             kolId,
+            address,
             'queued',
             `Falha transitória — nova tentativa (${attempt + 1}/${MAX_ATTEMPTS}) em instantes.`,
           );
           // Reenfileira DEPOIS do backoff, sem travar a fila enquanto espera.
-          setTimeout(() => this.enqueue(kolId), wait).unref?.();
+          setTimeout(() => this.enqueue(kolId, address), wait).unref?.();
           continue;
         }
 
-        this.attempts.delete(kolId);
+        this.attempts.delete(job);
         this.events.emit(WALLET_SCAN_STATE_EVENT, {
           kolId,
           status: result.status,
@@ -773,7 +828,7 @@ export class WalletReaderService implements OnModuleInit {
    * on-chain (transferência entre as duas) ou padrão repetido em ao menos
    * `MIN_TOKENS_FOR_PATTERN` tokens. Coincidência isolada é descartada.
    */
-  async scanKol(kolId: string): Promise<ScanResult> {
+  async scanKol(kolId: string, address?: string): Promise<ScanResult> {
     const preset = await this.prisma.getReadClient().kolPreset.findFirst({
       where: { id: kolId, deletedAt: null },
       select: { id: true, name: true, wallets: true },
@@ -790,7 +845,10 @@ export class WalletReaderService implements OnModuleInit {
 
     const universe = await this.buildUniverse();
     const ownAddrs = new Set(profileWallets.map((w) => w.address));
-    const publicWallet = profileWallets[0];
+    // A carteira varrida é a escolhida por quem pediu (a primeira, por omissão).
+    // As outras do KOL seguem em `ownAddrs`, para não virarem achado de si mesmas.
+    const publicWallet =
+      profileWallets.find((w) => w.address === address) ?? profileWallets[0];
     let apiCalls = 0;
 
     const fail = (message: string) =>
@@ -836,23 +894,31 @@ export class WalletReaderService implements OnModuleInit {
     }
 
     const findings = new Map<string, Finding>();
-    /** Só entra no radar endereço que já está no índice e não é do próprio KOL. */
+    /**
+     * Entra no radar QUALQUER endereço que não seja do próprio KOL — inclusive
+     * um que ainda não está no índice.
+     *
+     * Antes o filtro era `if (!universe.has(address)) return null`, e a
+     * varredura só sabia reconhecer carteira JÁ cadastrada: no Eddy ela achou
+     * 35 contrapartes e descartou as 35. Estar no índice virou anotação (de
+     * quem é o endereço), não requisito.
+     */
     const touch = (address: string): Finding | null => {
       if (ownAddrs.has(address)) return null;
-      const known = universe.get(address);
-      if (!known) return null;
       if (!findings.has(address)) {
+        const known = universe.get(address);
         findings.set(address, {
           address,
-          name: known.walletName,
-          ownerKolId: known.kolId,
-          ownerKolName: known.kolName,
+          known: Boolean(known),
+          verified: false,
+          sharedTokens: 0,
+          name: known?.walletName ?? null,
+          ownerKolId: known?.kolId ?? null,
+          ownerKolName: known?.kolName ?? null,
           signals: new Set(),
           evidence: [],
-          // O índice é NOSSO: pertencer a outro KOL já é a identidade própria
-          // que antes dependia das tags de terceiro.
-          recognizedElsewhere: known.kolId !== kolId,
-          recognizedAs: known.kolId !== kolId ? known.kolName : null,
+          recognizedElsewhere: Boolean(known) && known!.kolId !== kolId,
+          recognizedAs: known && known.kolId !== kolId ? known.kolName : null,
         });
       }
       return findings.get(address)!;
@@ -886,7 +952,19 @@ export class WalletReaderService implements OnModuleInit {
     //    chamada Birdeye custa ~1,1s e não há concorrência possível.
     const newestBuy = Math.max(...tokens.map((t) => t.kolBuyAt));
     const beforeTs = newestBuy + COPYTRADER_WINDOW_SECONDS;
-    const candidates = Array.from(findings.keys()).slice(0, MAX_CANDIDATES);
+
+    // Cada verificação custa ~1,1s, então a ORDEM importa: quem transferiu mais
+    // tokens distintos (e mais valor) é o candidato mais promissor. Endereço já
+    // no índice fura a fila — é o mais barato de confirmar.
+    const score = (f: Finding) => {
+      const tks = new Set(f.evidence.filter((e) => e.type === 'transfer').map((e) => e.tokenAddress));
+      const usd = f.evidence.reduce((a, e) => a + (e.transferUsd ?? 0), 0);
+      return (f.known ? 1e9 : 0) + tks.size * 1e6 + Math.min(usd, 1e5);
+    };
+    const candidates = Array.from(findings.values())
+      .sort((a, b) => score(b) - score(a))
+      .slice(0, MAX_CANDIDATES)
+      .map((f) => f.address);
     const deadline = Date.now() + VERIFY_BUDGET_MS;
     let unverified = Math.max(0, findings.size - candidates.length);
 
@@ -904,9 +982,24 @@ export class WalletReaderService implements OnModuleInit {
         continue;
       }
 
+      const self = findings.get(address);
+      if (self) self.verified = true;
+
+      // Carteira que negocia dezenas de tokens distintos numa janela curta é
+      // infraestrutura (bot, roteador, saque de corretora), não sidewallet de
+      // pessoa. Descarta antes de virar achado.
+      const distinctMints = new Set(swaps.map((sw) => sw.mint)).size;
+      if (distinctMints > INFRA_DISTINCT_MINTS) {
+        findings.delete(address);
+        continue;
+      }
+
       for (const tok of tokens) {
         const mine = swaps.filter((s) => s.mint === tok.address);
         if (!mine.length) continue;
+        // Negociou um token que o KOL também negociou — é isso que confirma um
+        // endereço que ainda não está no índice.
+        if (self) self.sharedTokens++;
         const buys = mine.filter((s) => s.side === 'BUY').map((s) => s.at);
         const sells = mine.filter((s) => s.side === 'SELL').map((s) => s.at);
         const firstBuyAt = buys.length ? Math.min(...buys) : null;
@@ -965,6 +1058,11 @@ export class WalletReaderService implements OnModuleInit {
       if (role === 'copytrader' && copytradeHit) {
         parts.push(`Comprou ${copytradeHit.token} ${Math.max(1, Math.round(copytradeHit.deltaSeconds / 60))} min DEPOIS da carteira pública — copytrader normal, não sidewallet.`);
       }
+      if (!f.known && role === 'sidewallet') {
+        parts.push(
+          `Endereço NOVO — ainda não estava no índice. Confirmado por link direto mais atividade nos mesmos ${f.sharedTokens} token${f.sharedTokens === 1 ? '' : 's'} da carteira pública.`,
+        );
+      }
       if (f.recognizedElsewhere && role === 'sidewallet') {
         parts.push(`Aviso: esse endereço já está no índice como carteira de ${f.recognizedAs ?? 'outro KOL'} — pode ser um trader independente, não uma sidewallet.`);
       }
@@ -987,17 +1085,32 @@ export class WalletReaderService implements OnModuleInit {
     const flagged: ScanFlagged[] = [];
     findings.forEach((f) => {
       const hasTransfer = f.signals.has('transfer');
-      const patternTokens = new Set(f.evidence.filter((e) => e.type === 'early_buy_late_sell').map((e) => e.tokenAddress)).size;
-      const hasDirectLink = hasTransfer;
+      const patternTokens = new Set(
+        f.evidence.filter((e) => e.type === 'early_buy_late_sell').map((e) => e.tokenAddress),
+      ).size;
       const hasConfirmedPattern = patternTokens >= MIN_TOKENS_FOR_PATTERN;
       const onlyCopytrade = f.signals.size === 1 && f.signals.has('copytrade');
+
       if (onlyCopytrade) {
         flagged.push(buildEntry(f, 'copytrader', 'info'));
         return;
       }
-      if (!hasDirectLink && !hasConfirmedPattern) return;
-      if (!hasDirectLink && hasConfirmedPattern && f.recognizedElsewhere) return;
-      flagged.push(buildEntry(f, 'sidewallet', hasDirectLink ? 'high' : 'medium'));
+
+      if (!f.known) {
+        // DESCOBERTA: barra mais alta. Uma transferência sozinha pode ser
+        // airdrop, saque de corretora ou envio aleatório — só vira achado com
+        // atividade confirmada nos MESMOS tokens da carteira pública. Candidato
+        // que não coube na verificação não entra: seria palpite, não evidência.
+        if (!hasTransfer || !f.verified || f.sharedTokens === 0) return;
+        const strong = hasConfirmedPattern || f.sharedTokens >= MIN_TOKENS_FOR_PATTERN;
+        flagged.push(buildEntry(f, 'sidewallet', strong ? 'high' : 'medium'));
+        return;
+      }
+
+      // Já no índice: o link direto sozinho basta (a identidade já é conhecida).
+      if (!hasTransfer && !hasConfirmedPattern) return;
+      if (!hasTransfer && hasConfirmedPattern && f.recognizedElsewhere) return;
+      flagged.push(buildEntry(f, 'sidewallet', hasTransfer ? 'high' : 'medium'));
     });
 
     const roleOrder: Record<string, number> = { sidewallet: 0, copytrader: 1 };
@@ -1007,11 +1120,15 @@ export class WalletReaderService implements OnModuleInit {
     const sidewallets = flagged.filter((f) => f.role === 'sidewallet');
     const copytraders = flagged.filter((f) => f.role === 'copytrader');
     const linked = sidewallets.filter((f) => f.confidence === 'high').length;
+    const discovered = flagged.filter((f) => !f.ownerKolId).length;
+    const novos = discovered
+      ? ` ${discovered} ${discovered === 1 ? 'endereço novo' : 'endereços novos'} (fora do índice) ${discovered === 1 ? 'foi descoberto' : 'foram descobertos'}.`
+      : '';
     const partial =
       unverified > 0
         ? ` ${unverified} ${unverified === 1 ? 'candidato ficou' : 'candidatos ficaram'} sem verificação temporal (teto de candidatos ou orçamento de tempo) — o link direto deles continua valendo.`
         : '';
-    const summary = `Analisou os últimos ${tokens.length} tokens de ${preset.name} contra as outras ${universe.size - ownAddrs.size} carteiras do índice: ${sidewallets.length} ${sidewallets.length === 1 ? 'sidewallet confirmada' : 'sidewallets confirmadas'} (${linked} com link direto on-chain, ${sidewallets.length - linked} por padrão comportamental repetido) e ${copytraders.length} ${copytraders.length === 1 ? 'copytrader identificado' : 'copytraders identificados'}. Coincidências de compra isolada (sem confirmação) foram descartadas.${partial}`;
+    const summary = `Analisou os últimos ${tokens.length} tokens de ${preset.name} contra as outras ${universe.size - ownAddrs.size} carteiras do índice: ${sidewallets.length} ${sidewallets.length === 1 ? 'sidewallet confirmada' : 'sidewallets confirmadas'} (${linked} com link direto on-chain, ${sidewallets.length - linked} por padrão comportamental repetido) e ${copytraders.length} ${copytraders.length === 1 ? 'copytrader identificado' : 'copytraders identificados'}. Coincidências de compra isolada (sem confirmação) foram descartadas.${novos}${partial}`;
 
     return this.persist({
       kolId,

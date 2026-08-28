@@ -234,7 +234,10 @@ enum TradeSide {
  * Cacheado — o front lê os últimos scans; rodar de novo faz upsert.
  */
 model WalletScan {
-  kolId          String   @id
+  // A varredura é de UMA carteira, e um KOL tem várias: a chave é o par. Antes
+  // era só `kolId`, e varrer uma segunda carteira sobrescrevia o resultado da
+  // primeira.
+  kolId          String
   kolName        String
   scannedAt      DateTime
   // "queued" | "running" | "complete" | "error". A varredura saiu do caminho da
@@ -248,6 +251,8 @@ model WalletScan {
   summary        String   @db.Text
   updatedAt      DateTime @updatedAt
 
+  @@id([kolId, publicWallet])
+  @@index([kolId])
   @@index([status])
 }
 
