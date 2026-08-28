@@ -9,7 +9,6 @@ import {
 } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 import type { CapturedMessage } from '@prisma/client';
-import { PrismaService } from '../../prisma/prisma.service';
 import { isTrustedOrigin } from '../../common/config/allowed-origins';
 import {
   WALLET_SYNC_STATE_EVENT,
@@ -21,8 +20,8 @@ import { FEED_CAPTURED_EVENT } from '../feed/feed.service';
 const ALLOWED_SURFACES = new Set(['client', 'admin', 'organizer']);
 
 const userRoom = (userId: string): string => `user:${userId}`;
-/** Sala dos admins — recebe o feed do Discord em tempo real. */
-const FEED_ADMINS_ROOM = 'feed:admins';
+/** Sala do feed do radar — todo usuário autenticado recebe as capturas. */
+const FEED_ROOM = 'feed:all';
 
 /**
  * Extrai o token de acesso do cookie do handshake. A superfície vem do header
@@ -79,7 +78,6 @@ export class EventsGateway implements OnGatewayConnection {
   constructor(
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
-    private readonly prisma: PrismaService,
   ) {}
 
   async handleConnection(client: Socket): Promise<void> {
@@ -99,12 +97,9 @@ export class EventsGateway implements OnGatewayConnection {
 
       await client.join(userRoom(payload.sub));
 
-      // Admin também entra na sala do feed (recebe as capturas em tempo real).
-      const user = await this.prisma.getReadClient().user.findUnique({
-        where: { id: payload.sub },
-        select: { role: true },
-      });
-      if (user?.role === 'ADMIN') await client.join(FEED_ADMINS_ROOM);
+      // O feed do radar é visível a qualquer usuário autenticado — mesma regra
+      // do GET /feed/messages (só JwtAuthGuard). Todo socket entra na sala.
+      await client.join(FEED_ROOM);
     } catch {
       // Assinatura/exp inválida → sem canal (silencioso; é ruído esperado).
       client.disconnect();
@@ -121,9 +116,9 @@ export class EventsGateway implements OnGatewayConnection {
     });
   }
 
-  /** Nova captura do Discord → empurra em tempo real para os admins conectados. */
+  /** Nova captura do Discord → empurra em tempo real para todos os conectados. */
   @OnEvent(FEED_CAPTURED_EVENT)
   handleFeedCaptured(message: CapturedMessage): void {
-    this.server.to(FEED_ADMINS_ROOM).emit('feed:new', message);
+    this.server.to(FEED_ROOM).emit('feed:new', message);
   }
 }
