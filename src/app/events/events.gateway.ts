@@ -15,6 +15,10 @@ import {
   WalletSyncStateEvent,
 } from '../analytics/ingestion/wallet-sync.service';
 import { FEED_CAPTURED_EVENT } from '../feed/feed.service';
+import {
+  WALLET_SCAN_STATE_EVENT,
+  type WalletScanStateEvent,
+} from '../wallet-reader/wallet-reader.service';
 
 /** Superfícies de sessão válidas (cada uma tem seu cookie `pt_at_<surface>`). */
 const ALLOWED_SURFACES = new Set(['client', 'admin', 'organizer']);
@@ -120,5 +124,14 @@ export class EventsGateway implements OnGatewayConnection {
   @OnEvent(FEED_CAPTURED_EVENT)
   handleFeedCaptured(message: CapturedMessage): void {
     this.server.to(FEED_ROOM).emit('feed:new', message);
+  }
+
+  /**
+   * Varredura terminou → avisa TODOS os conectados. O scan é do preset, igual
+   * para qualquer usuário, então a sala é a mesma do feed (todo socket autenticado).
+   */
+  @OnEvent(WALLET_SCAN_STATE_EVENT)
+  handleWalletScanState(payload: WalletScanStateEvent): void {
+    this.server.to(FEED_ROOM).emit('scan:update', payload.result);
   }
 }

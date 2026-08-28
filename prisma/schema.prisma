@@ -23,13 +23,13 @@ enum Role {
 }
 
 model User {
-  id       String @id @default(cuid())
-  email    String @unique
+  id       String  @id @default(cuid())
+  email    String  @unique
   // Null quando a conta é só Google (sem login local por senha).
   password String?
 
-  firstName String @default("")
-  lastName  String @default("")
+  firstName  String  @default("")
+  lastName   String  @default("")
   // avatarUrl: URL exibida no front. Para contas Google, a foto é BAIXADA e
   // re-hospedada por nós (bytes em `avatarData`, servidos por GET /users/:id/avatar)
   // → avatarUrl aponta para o nosso endpoint, não para o googleusercontent.
@@ -67,6 +67,8 @@ model User {
   sources         Source[]
   catalog         WalletCatalog[]
   favoriteAuthors FavoriteAuthor[]
+  kolOverrides    KolUserOverride[]
+  kolGroups       KolUserGroup[]
 
   @@index([googleId])
   @@index([deletedAt])
@@ -235,13 +237,33 @@ model WalletScan {
   kolId          String   @id
   kolName        String
   scannedAt      DateTime
-  status         String // "complete" | "error"
+  // "queued" | "running" | "complete" | "error". A varredura saiu do caminho da
+  // request: o POST enfileira e devolve na hora, o worker preenche o resto e
+  // avisa por socket.
+  status         String
   publicWallet   String
   tokensAnalyzed Int      @default(0)
   apiCalls       Int      @default(0)
   flagged        Json // ScanFlagged[]
   summary        String   @db.Text
   updatedAt      DateTime @updatedAt
+
+  @@index([status])
+}
+
+/**
+ * Cache de leitura on-chain, por endereço.
+ * O resultado é o MESMO para todo mundo e não muda no passado, então buscar de
+ * novo é desperdício puro — ainda mais com a Birdeye em ~1 req/s. Duas
+ * varreduras que compartilham um candidato pagam a chamada uma vez só.
+ */
+model OnchainCache {
+  // "<tipo>:<chain>:<address>" — ex.: "swaps:sol:4rXiu…", "transfers:sol:4rXiu…"
+  key       String   @id
+  payload   Json
+  fetchedAt DateTime @default(now())
+
+  @@index([fetchedAt])
 }
 
 model Trade {
@@ -354,14 +376,14 @@ model TokenPosition {
   symbol String?
 
   // Custo médio ponderado (WACC) e quantidade corrente ainda em carteira.
-  qtyHeld      Decimal @default(0) @db.Decimal(38, 18)
-  avgCostUsd   Decimal @default(0) @db.Decimal(38, 18) // custo médio por unidade
-  realizedPnl  Decimal @default(0) @db.Decimal(38, 12) // PnL realizado acumulado (USD)
-  feesUsd      Decimal @default(0) @db.Decimal(38, 12)
-  buyCount     Int     @default(0)
-  sellCount    Int     @default(0)
-  firstBuyAt   DateTime?
-  lastTradeAt  DateTime?
+  qtyHeld     Decimal   @default(0) @db.Decimal(38, 18)
+  avgCostUsd  Decimal   @default(0) @db.Decimal(38, 18) // custo médio por unidade
+  realizedPnl Decimal   @default(0) @db.Decimal(38, 12) // PnL realizado acumulado (USD)
+  feesUsd     Decimal   @default(0) @db.Decimal(38, 12)
+  buyCount    Int       @default(0)
+  sellCount   Int       @default(0)
+  firstBuyAt  DateTime?
+  lastTradeAt DateTime?
 
   updatedAt DateTime @updatedAt
 
@@ -477,8 +499,8 @@ model DiscordMonitor {
 
   // Alvo: um CANAL específico (channelId) OU um SERVIDOR inteiro (guildId, sem
   // channelId → observa todos os canais do servidor). Ao menos um dos dois.
-  channelId String? // ID do canal do Discord
-  guildId   String? // ID do servidor (guild) — observa o servidor todo se sem channelId
+  channelId      String? // ID do canal do Discord
+  guildId        String? // ID do servidor (guild) — observa o servidor todo se sem channelId
   // Padrão de match: regex "/corpo/flags" OU substring literal (case-insensitive).
   // VAZIO/null = espelha TODAS as mensagens (inclusive de bots).
   pattern        String?
@@ -517,7 +539,7 @@ model CapturedMessage {
   matchedPattern   String?
   discordMessageId String?
 
-  text  String  @db.Text // texto extraído (content + embeds)
+  text  String   @db.Text // texto extraído (content + embeds)
   embed Json? // embeds crus (para render rico no site)
   links String[] // URLs extraídas
 
@@ -601,5 +623,94 @@ model FavoriteAuthor {
   createdAt DateTime @default(now())
 
   @@unique([userId, authorId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KOL Index (Wallet Reader)
+// ─────────────────────────────────────────────────────────────────────────────
+// Modelo em DUAS camadas: um PRESET global que todo usuário enxerga, e um
+// OVERRIDE por conta que só o dono vê. O estado efetivo é `preset + override`,
+// com o override vencendo campo a campo. Admin escreve no preset; usuário comum
+// só escreve no próprio override.
+
+// PRESET: a lista de KOLs servida a TODOS. Só ADMIN escreve (rotas
+// `/wallet-reader/admin/*`). Semeado 1× a partir de `data/kol-profiles.json`;
+// o `id` é o mesmo do JSON, então os scans já gravados (`WalletScan.kolId`)
+// continuam casando.
+model KolPreset {
+  id String @id
+
+  name      String
+  wallets   Json     @default("[]") // WalletRef[] — { name, address }
+  squads    String[] @default([])
+  relevance Int      @default(20) // 0–100 (o `seedRelevance` do JSON)
+  types     String[] @default([]) // ids da taxonomia de tipos de trader
+  twitter   String   @default("")
+  notes     String   @default("")
+  avatar    String? // data URL enviada pelo admin; null = avatar determinístico
+
+  // Exclusão é SOFT: overrides de usuário e scans referenciam `id` sem FK —
+  // apagar de verdade deixaria essas linhas órfãs e perderia histórico.
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([deletedAt])
+  // Busca por nome no preset é ILIKE '%termo%' — B-tree não serve para isso.
+  // O GIN + gin_trgm_ops (extensão pg_trgm, criada na migration) é o que faz a
+  // busca da tela de admin parar de varrer a tabela inteira.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+}
+
+// OVERRIDE: o que UM usuário mudou em UM KOL, na conta dele. Campo null = herda
+// do preset; `Json?` (e não `String[]`) exatamente para distinguir "não mexi"
+// (null) de "esvaziei" ([]), que uma lista escalar do Prisma não expressa.
+//
+// Sem FK para `KolPreset`: um KOL criado pelo próprio usuário (`isCustom`) não
+// existe no preset, e uma FK impediria a linha. A junção é feita no serviço.
+model KolUserOverride {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  kolId String
+
+  name      String?
+  relevance Int?
+  types     Json? // string[] | null
+  fnfGroups Json? // string[] | null — ids de KolUserGroup
+  twitter   String?
+  notes     String?
+  // null = herda o avatar do preset; "" = o usuário LIMPOU (volta ao hash).
+  avatar    String?
+
+  walletsAdded         Json? // WalletRef[]
+  walletsRemoved       Json? // string[] — endereços do preset ocultados
+  dismissedSidewallets Json? // string[]
+
+  // KOL que só existe para este usuário (não veio do preset).
+  isCustom Boolean @default(false)
+  // O usuário escondeu da coleção dele um KOL que veio do preset.
+  deleted  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, kolId])
+  @@index([userId])
+}
+
+// Grupo/FnF criado por um usuário para organizar os KOLs na conta dele.
+model KolUserGroup {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name String
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, name])
   @@index([userId])
 }

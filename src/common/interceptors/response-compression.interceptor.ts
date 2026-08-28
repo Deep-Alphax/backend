@@ -5,12 +5,23 @@ import {
   CallHandler,
   StreamableFile,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
+import { RAW_RESPONSE } from '../decorators/raw-response.decorator';
 
 @Injectable()
 export class ResponseCompressionInterceptor implements NestInterceptor {
+  constructor(private readonly reflector: Reflector) {}
+
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    // Rota marcada com @RawResponse(): entrega o corpo como o handler devolveu.
+    const raw = this.reflector.getAllAndOverride<boolean>(RAW_RESPONSE, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (raw) return next.handle();
+
     return next.handle().pipe(
       map((data) => {
         if (data instanceof StreamableFile) return data;
