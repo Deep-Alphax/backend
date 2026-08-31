@@ -46,13 +46,13 @@ async function bootstrap() {
 
   app.use(
     express.json({
-      limit: '200mb',
+      limit: '5mb',
       verify: (req: RequestWithRawBody, _res, buf) => {
         req.rawBody = buf;
       },
     }),
   );
-  app.use(express.urlencoded({ limit: '200mb', extended: true }));
+  app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
   const configService = app.get(ConfigService);
   const httpAdapterHost = app.get(HttpAdapterHost);

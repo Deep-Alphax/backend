@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CapturedMessage, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -25,6 +21,7 @@ const FAVORITE_SELECT = {
   id: true,
   authorId: true,
   authorTag: true,
+  followed: true,
   nickname: true,
   color: true,
   photoUpdatedAt: true,
@@ -35,11 +32,22 @@ type FavoriteRow = Prisma.FavoriteAuthorGetPayload<{
   select: typeof FAVORITE_SELECT;
 }>;
 
+/** Campos de personalização — servem tanto ao create quanto ao update do upsert. */
+interface PersonalizationFields {
+  nickname?: string | null;
+  color?: string | null;
+  photoData?: Uint8Array<ArrayBuffer>;
+  photoMime?: string;
+  photoUpdatedAt?: Date;
+}
+
 /** Favorito serializável (sem bytes) + URL absoluta da foto (ou null). */
 export interface FavoriteDto {
   id: string;
   authorId: string;
   authorTag: string | null;
+  /** `false` = só personalizado (não segue) — não entra no feed de favoritos. */
+  followed: boolean;
   nickname: string | null;
   color: string | null;
   photoUrl: string | null;
@@ -71,6 +79,7 @@ export class FavoritesService {
       id: f.id,
       authorId: f.authorId,
       authorTag: f.authorTag,
+      followed: f.followed,
       nickname: f.nickname,
       color: f.color,
       createdAt: f.createdAt,
@@ -81,7 +90,11 @@ export class FavoritesService {
     };
   }
 
-  /** Lista os autores seguidos pelo usuário (mais recentes primeiro). */
+  /**
+   * Lista os autores SEGUIDOS e os apenas PERSONALIZADOS (mais recentes
+   * primeiro). O cliente usa a lista inteira para pintar os cards e filtra por
+   * `followed` no painel "Seus favoritos".
+   */
   async list(userId: string): Promise<FavoriteDto[]> {
     const rows = await this.prisma.getReadClient().favoriteAuthor.findMany({
       where: { userId },
@@ -99,15 +112,17 @@ export class FavoritesService {
     const authorTag = dto.authorTag ?? null;
     const row = await this.prisma.getWriteClient().favoriteAuthor.upsert({
       where: { userId_authorId: { userId, authorId: dto.authorId } },
-      create: { userId, authorId: dto.authorId, authorTag },
-      update: { authorTag },
+      create: { userId, authorId: dto.authorId, authorTag, followed: true },
+      // Re-follow de um autor só personalizado reaproveita a linha.
+      update: { authorTag, followed: true },
       select: FAVORITE_SELECT,
     });
     return this.toDto(row);
   }
 
   /**
-   * Personaliza um favorito (apelido + cor). Escopo garantido pela chave única
+   * Personaliza um autor (apelido + cor) — SEM exigir follow: se ainda não há
+   * linha, ela nasce com `followed=false`. Escopo garantido pela chave única
    * `(userId, authorId)`. Campos ausentes não mudam; `null`/apelido vazio limpam.
    */
   async update(
@@ -115,14 +130,14 @@ export class FavoritesService {
     authorId: string,
     dto: UpdateFavoriteDto,
   ): Promise<FavoriteDto> {
-    const data: Prisma.FavoriteAuthorUpdateInput = {};
+    const data: PersonalizationFields = {};
     if (dto.nickname !== undefined) {
       const trimmed = dto.nickname?.trim();
       data.nickname = trimmed ? trimmed : null;
     }
     if (dto.color !== undefined) data.color = dto.color ?? null;
 
-    return this.writeScoped(userId, authorId, data);
+    return this.writeScoped(userId, authorId, dto.authorTag ?? null, data);
   }
 
   /**
@@ -142,35 +157,39 @@ export class FavoritesService {
       throw new BadRequestException('Imagem inválida');
     }
     const { data, mime } = processed;
-    return this.writeScoped(userId, authorId, {
+    // `authorTag` null → o upsert cai na chave (que já é a tag do autor).
+    return this.writeScoped(userId, authorId, null, {
       photoData: new Uint8Array(data),
       photoMime: mime,
       photoUpdatedAt: new Date(),
     });
   }
 
-  /** Update escopado por (userId, authorId); 404 se o favorito não existe. */
+  /**
+   * Grava personalização escopada por (userId, authorId). É UPSERT: personalizar
+   * não exige seguir, e a linha criada aqui nasce com `followed=false` (some do
+   * feed de favoritos, mas pinta os cards do autor).
+   */
   private async writeScoped(
     userId: string,
     authorId: string,
-    data: Prisma.FavoriteAuthorUpdateInput,
+    authorTag: string | null,
+    data: PersonalizationFields,
   ): Promise<FavoriteDto> {
-    try {
-      const row = await this.prisma.getWriteClient().favoriteAuthor.update({
-        where: { userId_authorId: { userId, authorId } },
-        data,
-        select: FAVORITE_SELECT,
-      });
-      return this.toDto(row);
-    } catch (err) {
-      if (
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === 'P2025'
-      ) {
-        throw new NotFoundException('Favorito não encontrado');
-      }
-      throw err;
-    }
+    const row = await this.prisma.getWriteClient().favoriteAuthor.upsert({
+      where: { userId_authorId: { userId, authorId } },
+      // A chave de follow JÁ é a tag do autor — usada como exibição no fallback.
+      create: {
+        userId,
+        authorId,
+        authorTag: authorTag ?? authorId,
+        followed: false,
+        ...data,
+      },
+      update: data,
+      select: FAVORITE_SELECT,
+    });
+    return this.toDto(row);
   }
 
   /**
@@ -186,11 +205,28 @@ export class FavoritesService {
     return { data: Buffer.from(f.photoData), mime: f.photoMime || 'image/webp' };
   }
 
-  /** Deixa de seguir. Idempotente: silencioso se não existia. */
+  /**
+   * Deixa de seguir. Idempotente: silencioso se não existia. A linha SOBREVIVE
+   * (como `followed=false`) quando há personalização — desfazer o follow não pode
+   * apagar o apelido/cor/foto que o usuário deu ao autor.
+   */
   async remove(userId: string, authorId: string): Promise<{ authorId: string }> {
-    await this.prisma
-      .getWriteClient()
-      .favoriteAuthor.deleteMany({ where: { userId, authorId } });
+    const write = this.prisma.getWriteClient();
+    const row = await write.favoriteAuthor.findUnique({
+      where: { userId_authorId: { userId, authorId } },
+      select: { id: true, nickname: true, color: true, photoUpdatedAt: true },
+    });
+    if (!row) return { authorId };
+
+    const personalized = Boolean(row.nickname || row.color || row.photoUpdatedAt);
+    if (personalized) {
+      await write.favoriteAuthor.update({
+        where: { id: row.id },
+        data: { followed: false },
+      });
+    } else {
+      await write.favoriteAuthor.deleteMany({ where: { id: row.id } });
+    }
     return { authorId };
   }
 
@@ -209,8 +245,9 @@ export class FavoritesService {
     const limit = Math.min(MAX_LIMIT, Math.max(1, query.limit ?? DEFAULT_LIMIT));
 
     const read = this.prisma.getReadClient();
+    // Só os SEGUIDOS: personalizar um autor não o coloca no feed de favoritos.
     const favorites = await read.favoriteAuthor.findMany({
-      where: { userId },
+      where: { userId, followed: true },
       select: { authorId: true },
     });
     // A chave de follow é o authorTag (identidade presente em 100% das capturas);

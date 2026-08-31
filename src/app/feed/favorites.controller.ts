@@ -62,7 +62,9 @@ export class FavoritesController {
   }
 
   @Patch(':authorId')
-  @ApiOperation({ summary: 'Personaliza um favorito (apelido + cor)' })
+  @ApiOperation({
+    summary: 'Personaliza um autor (apelido + cor) — não exige seguir',
+  })
   update(
     @Request() req,
     @Param('authorId') authorId: string,
@@ -72,7 +74,9 @@ export class FavoritesController {
   }
 
   @Post(':authorId/photo')
-  @ApiOperation({ summary: 'Envia a foto do avatar de um favorito (imagem)' })
+  @ApiOperation({
+    summary: 'Envia a foto do avatar de um autor (imagem) — não exige seguir',
+  })
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),

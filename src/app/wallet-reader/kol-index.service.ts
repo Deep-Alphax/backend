@@ -15,16 +15,24 @@ import {
 } from './dto/kol.dto';
 
 /**
- * Faixas de relevância — espelho de `KOL_TIERS` no frontend. As contagens por
- * faixa da rail passaram a ser calculadas aqui (agregação é do backend).
+ * Níveis ("Level") do KOL — espelho de `KOL_TIERS` no frontend
+ * (`src/lib/walletReader/types.ts`). Os `id` e as faixas TÊM que bater com os de
+ * lá: o filtro por tier chega como lista de `id` e as contagens da rail são
+ * calculadas aqui (agregação é do backend).
  */
 const TIERS = [
-  { id: 'comum', min: 0, max: 24 },
-  { id: 'incomum', min: 25, max: 49 },
-  { id: 'raro', min: 50, max: 69 },
-  { id: 'epico', min: 70, max: 84 },
-  { id: 'lendario', min: 85, max: 100 },
+  { id: 'wood', min: 0, max: 12 },
+  { id: 'bronze', min: 13, max: 25 },
+  { id: 'silver', min: 26, max: 37 },
+  { id: 'gold', min: 38, max: 50 },
+  { id: 'platinum', min: 51, max: 62 },
+  { id: 'diamond', min: 63, max: 75 },
+  { id: 'alpha', min: 76, max: 87 },
+  { id: 'super-alpha', min: 88, max: 100 },
 ] as const;
+
+/** Piso do nível `alpha` — recorte rápido "Alpha e acima" da rail. */
+const ALPHA_MIN = TIERS.find((t) => t.id === 'alpha')!.min;
 
 const tierOf = (score: number) =>
   TIERS.find((t) => score >= t.min && score <= t.max)?.id ?? TIERS[0].id;
@@ -238,7 +246,8 @@ export class KolIndexService implements OnModuleInit {
         case 'unclassified':
           return st.types.length === 0;
         case 'alphaUp':
-          return st.relevance >= 70;
+          // "Alpha e acima" = a partir do nível `alpha` (ver TIERS).
+          return st.relevance >= ALPHA_MIN;
         case 'noTwitter':
           return !st.twitter;
         case 'pendingScan':
@@ -275,7 +284,7 @@ export class KolIndexService implements OnModuleInit {
     const viewCounts: Record<string, number> = {
       all: states.length,
       unclassified: states.filter((st) => st.types.length === 0).length,
-      alphaUp: states.filter((st) => st.relevance >= 70).length,
+      alphaUp: states.filter((st) => st.relevance >= ALPHA_MIN).length,
       noTwitter: states.filter((st) => !st.twitter).length,
       pendingScan: states.filter((st) => !scannedIds.has(st.id)).length,
     };

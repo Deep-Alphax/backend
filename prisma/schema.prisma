@@ -615,6 +615,11 @@ model FavoriteAuthor {
   authorId  String // chave de follow = authorTag do autor (match exato)
   authorTag String? // exibição (redundante com a chave; mantido por clareza)
 
+  // A linha existe por DOIS motivos independentes: seguir o autor e/ou
+  // personalizá-lo. `followed=false` = só personalização (apelido/cor/foto), que
+  // aparece nos cards mas NÃO entra na lista nem no feed de favoritos.
+  followed Boolean @default(true)
+
   // Personalização por conta (modal "Personalizar usuário").
   nickname String? // apelido dado pelo usuário (sobrepõe o nome exibido)
   color    String? // chave de cor do avatar (allowlist), null = cor por hash

@@ -42,10 +42,17 @@ export class CreateFavoriteDto {
 }
 
 /**
- * Personaliza um autor seguido (apelido + cor). Campos ausentes não mudam;
- * `null` (ou apelido vazio) limpa o valor.
+ * Personaliza um autor (apelido + cor) — NÃO exige seguir: sem linha ainda, ela
+ * é criada só com a personalização. Campos ausentes não mudam; `null` (ou apelido
+ * vazio) limpa o valor.
  */
 export class UpdateFavoriteDto {
+  // Tag conhecida (exibição) — usada só quando a linha é criada aqui.
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  authorTag?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(60)
