@@ -1,6 +1,13 @@
 # Infra de desenvolvimento — Postgres + Redis.
 # Subir:  docker compose up -d   (ou: pnpm db:up)
 # Derrubar: docker compose down   (com -v também apaga os volumes/dados)
+#
+# `name:` fixa o *project name* do Compose. Sem ele o Compose usa o nome da PASTA
+# (`backend`) — que colide com outros projetos que também moram num diretório
+# `backend` (ex.: podiogo): mesma rede `backend_default`, mesmo prefixo de volume,
+# e um `compose down/up` aqui mexeria nos containers de lá.
+name: deepalpha
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -38,5 +45,8 @@ services:
       retries: 10
 
 volumes:
+  # `name:` explícito -> o volume NÃO herda o prefixo do project name.
   deepalpha_pgdata:
+    name: deepalpha_pgdata
   deepalpha_redisdata:
+    name: deepalpha_redisdata

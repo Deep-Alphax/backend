@@ -18,8 +18,8 @@ import { KolIndexService } from './kol-index.service';
 import {
   CreateKolCustomDto,
   ImportKolBackupDto,
-  KolGroupDto,
   KolQueryDto,
+  RenameKolSquadDto,
   UpdateKolOverrideDto,
 } from './dto/kol.dto';
 
@@ -49,7 +49,7 @@ export class KolIndexController {
   // Declarado ANTES de `kols/:kolId`: o Nest casa por ordem, e sem isso
   // "backup" seria lido como um id de KOL.
   @Get('kols/backup')
-  @ApiOperation({ summary: 'Backup das edições e grupos da conta' })
+  @ApiOperation({ summary: 'Backup das edições da conta' })
   backup(@Request() req) {
     return this.kols.exportBackup(req.user.id);
   }
@@ -91,23 +91,24 @@ export class KolIndexController {
     return this.kols.deleteOverride(req.user.id, kolId);
   }
 
-  // ── Grupos / FnFs da conta ─────────────────────────────────────────────────
+  // ── Squads da conta ────────────────────────────────────────────────────────
+  //
+  // Squad não é entidade: é um NOME na lista do override. Não existe rota de
+  // criação — marcar um KOL num squad é um PATCH nele. Sobram as duas operações
+  // que varrem a conta inteira e que o cliente não faria numa requisição só.
+  //
+  // Declaradas DEPOIS de `kols/*`: são caminhos distintos, mas manter os blocos
+  // separados evita que uma rota nova de `kols/:kolId` capture "squads".
 
-  @Post('groups')
-  @ApiOperation({ summary: 'Cria um grupo/FnF (idempotente por nome)' })
-  createGroup(@Request() req, @Body() dto: KolGroupDto) {
-    return this.kols.createGroup(req.user.id, dto.name);
+  @Patch('squads')
+  @ApiOperation({ summary: 'Renomeia um squad da conta em todos os KOLs dela' })
+  renameSquad(@Request() req, @Body() dto: RenameKolSquadDto) {
+    return this.kols.renameSquad(req.user.id, dto.from, dto.to);
   }
 
-  @Patch('groups/:id')
-  @ApiOperation({ summary: 'Renomeia um grupo/FnF' })
-  renameGroup(@Request() req, @Param('id') id: string, @Body() dto: KolGroupDto) {
-    return this.kols.renameGroup(req.user.id, id, dto.name);
-  }
-
-  @Delete('groups/:id')
-  @ApiOperation({ summary: 'Remove um grupo/FnF e o desvincula dos KOLs' })
-  deleteGroup(@Request() req, @Param('id') id: string) {
-    return this.kols.deleteGroup(req.user.id, id);
+  @Delete('squads/:name')
+  @ApiOperation({ summary: 'Tira um squad da conta de todos os KOLs dela' })
+  deleteSquad(@Request() req, @Param('name') name: string) {
+    return this.kols.deleteSquad(req.user.id, name);
   }
 }

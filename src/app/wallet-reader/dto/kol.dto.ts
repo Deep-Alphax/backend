@@ -125,12 +125,17 @@ export class UpdateKolPresetDto extends KolFieldsDto {
 
 /** Edições do usuário sobre um KOL, na conta dele. `null` volta a herdar. */
 export class UpdateKolOverrideDto extends KolFieldsDto {
+  /**
+   * Squads da CONTA — NOMES livres, no mesmo teto do preset (80). Os squads do
+   * preset são globais e só o ADMIN escreve; o estado efetivo do KOL é a união
+   * dos dois, e só estes o usuário pode tirar.
+   */
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MAX_TAGS)
   @IsString({ each: true })
-  @MaxLength(40, { each: true })
-  fnfGroups?: string[] | null;
+  @MaxLength(80, { each: true })
+  squads?: string[] | null;
 
   /**
    * Lista EFETIVA de carteiras desejada. O servidor deriva `walletsAdded` e
@@ -191,7 +196,6 @@ export class KolQueryDto {
   @IsOptional() @IsString() @MaxLength(400) tiers?: string;
   @IsOptional() @IsString() @MaxLength(400) types?: string;
   @IsOptional() @IsString() @MaxLength(800) squads?: string;
-  @IsOptional() @IsString() @MaxLength(800) groups?: string;
 
   @IsOptional()
   @IsIn(['relevance', 'name', 'wallets', 'tier'])
@@ -244,25 +248,43 @@ export class CreateKolCustomDto {
   wallet?: WalletRefDto;
 }
 
-// ── Grupos / FnFs (usuário logado) ───────────────────────────────────────────
+// ── Squads da conta ──────────────────────────────────────────────────────────
 
-export class KolGroupDto {
+/** Renomeia um squad da conta em TODOS os KOLs em que ele aparece. */
+export class RenameKolSquadDto {
   @IsString()
   @MaxLength(80)
-  name: string;
+  from: string;
+
+  @IsString()
+  @MaxLength(80)
+  to: string;
 }
 
 // ── Backup da conta (export/import) ──────────────────────────────────────────
 
-/** Um override do backup — o `kolId` viaja no corpo, não na URL. */
+/**
+ * Um override do backup — o `kolId` viaja no corpo, não na URL.
+ *
+ * `fnfGroups` continua aceito (e só aqui) para ler arquivos gerados ANTES da
+ * unificação squad/grupo: lá ele era uma lista de ids de `KolUserGroup`, que o
+ * serviço traduz para nomes usando o `groups` do próprio arquivo.
+ */
 class ImportOverrideDto extends UpdateKolOverrideDto {
   @IsString()
   @MaxLength(120)
   kolId: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_TAGS)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  fnfGroups?: string[] | null;
 }
 
-/** Grupo do backup. O `id` é o do arquivo e serve só para remapear `fnfGroups`. */
-class ImportGroupDto {
+/** Grupo de um backup ANTIGO: o `id` só serve para traduzir `fnfGroups`. */
+class LegacyImportGroupDto {
   @IsString()
   @MaxLength(80)
   id: string;
@@ -273,9 +295,10 @@ class ImportGroupDto {
 }
 
 /**
- * Restaura um backup na conta. Os grupos são recriados POR NOME (o id do arquivo
- * não vale nesta conta) e as referências em `fnfGroups` são remapeadas para os
- * ids novos — importar o backup de outra conta não deixa ponteiro solto.
+ * Restaura um backup na conta. Arquivos antigos (com `groups` + `fnfGroups` por
+ * id) continuam valendo: os ids são traduzidos para nomes de squad usando a
+ * tabela `groups` que veio no próprio arquivo, então nada do que o usuário já
+ * havia marcado se perde na atualização.
  */
 export class ImportKolBackupDto {
   @IsOptional()
@@ -285,10 +308,11 @@ export class ImportKolBackupDto {
   @Type(() => ImportOverrideDto)
   overrides?: ImportOverrideDto[];
 
+  /** Só em backups antigos — a tradução id → nome dos squads. */
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(200)
   @ValidateNested({ each: true })
-  @Type(() => ImportGroupDto)
-  groups?: ImportGroupDto[];
+  @Type(() => LegacyImportGroupDto)
+  groups?: LegacyImportGroupDto[];
 }

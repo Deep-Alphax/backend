@@ -67,7 +67,8 @@ export interface KolOverrideView {
   name: string | null;
   relevance: number | null;
   types: string[] | null;
-  fnfGroups: string[] | null;
+  /** Squads da CONTA (nomes). `null` = o usuário não marcou nenhum. */
+  squads: string[] | null;
   twitter: string | null;
   notes: string | null;
   avatar: string | null;
@@ -91,7 +92,7 @@ type OverridePatch = Partial<{
   avatar: string | null;
   deleted: boolean;
   types: Prisma.InputJsonValue | Prisma.NullTypes.DbNull;
-  fnfGroups: Prisma.InputJsonValue | Prisma.NullTypes.DbNull;
+  squads: Prisma.InputJsonValue | Prisma.NullTypes.DbNull;
   walletsAdded: Prisma.InputJsonValue | Prisma.NullTypes.DbNull;
   walletsRemoved: Prisma.InputJsonValue | Prisma.NullTypes.DbNull;
   dismissedSidewallets: Prisma.InputJsonValue | Prisma.NullTypes.DbNull;
@@ -103,12 +104,17 @@ export interface KolStateView {
   name: string;
   wallets: WalletRef[];
   walletCount: number;
+  /** Squads EFETIVOS: os do preset + os da conta, sem repetir. */
   squads: string[];
+  /**
+   * Só os da CONTA — o subconjunto de `squads` que este usuário pode tirar.
+   * Os do preset são globais e só o ADMIN mexe neles.
+   */
+  ownSquads: string[];
   seedRelevance: number;
   isCustom: boolean;
   relevance: number;
   types: string[];
-  fnfGroups: string[];
   twitter: string;
   notes: string;
   avatar: string | null;
@@ -132,11 +138,10 @@ export interface KolIndexPage {
     byTier: Record<string, number>;
     byType: Record<string, number>;
     bySquad: Record<string, number>;
-    byGroup: Record<string, number>;
   };
   viewCounts: Record<string, number>;
+  /** Todo squad visível ao usuário — preset + conta —, ordenado. */
   squads: string[];
-  groups: KolGroupView[];
 }
 
 /** Linha da lista de admin: o preset sem os endereços, só a contagem. */
@@ -145,16 +150,10 @@ export type KolPresetListItem = Omit<KolPresetView, 'wallets'> & {
   deletedAt: number | null;
 };
 
-export interface KolGroupView {
-  id: string;
-  name: string;
-}
-
 /** Tudo que a tela de KOLs precisa, em UMA chamada. */
 export interface KolIndexView {
   preset: KolPresetView[];
   overrides: KolOverrideView[];
-  groups: KolGroupView[];
 }
 
 interface SeedProfile {
@@ -216,14 +215,12 @@ export class KolIndexService implements OnModuleInit {
    */
   async getIndex(userId: string, q: KolQueryDto = {}): Promise<KolIndexPage> {
     const db = this.prisma.getReadClient();
-    const [preset, overrides, groups, scanned] = await Promise.all([
+    const [preset, overrides, scanned] = await Promise.all([
       db.kolPreset.findMany({ where: { deletedAt: null } }),
       db.kolUserOverride.findMany({ where: { userId } }),
-      db.kolUserGroup.findMany({ where: { userId }, orderBy: { name: 'asc' } }),
       db.walletScan.findMany({ select: { kolId: true } }),
     ]);
 
-    const groupIds = new Set(groups.map((g) => g.id));
     const overrideBy = new Map(overrides.map((o) => [o.kolId, o]));
     const hidden = new Set(overrides.filter((o) => o.deleted).map((o) => o.kolId));
     const scannedIds = new Set(scanned.map((r) => r.kolId));
@@ -231,11 +228,11 @@ export class KolIndexService implements OnModuleInit {
     const states: KolStateView[] = [];
     for (const p of preset) {
       if (hidden.has(p.id)) continue;
-      states.push(this.mergeState(p.id, p, overrideBy.get(p.id), groupIds));
+      states.push(this.mergeState(p.id, p, overrideBy.get(p.id)));
     }
     for (const o of overrides) {
       if (o.isCustom && !o.deleted) {
-        states.push(this.mergeState(o.kolId, null, o, groupIds));
+        states.push(this.mergeState(o.kolId, null, o));
       }
     }
 
@@ -271,14 +268,12 @@ export class KolIndexService implements OnModuleInit {
       byTier: {} as Record<string, number>,
       byType: {} as Record<string, number>,
       bySquad: {} as Record<string, number>,
-      byGroup: {} as Record<string, number>,
     };
     const bump = (m: Record<string, number>, k: string) => (m[k] = (m[k] ?? 0) + 1);
     for (const st of base) {
       bump(counts.byTier, tierOf(st.relevance));
       st.types.forEach((t) => bump(counts.byType, t));
       st.squads.forEach((x) => bump(counts.bySquad, x));
-      st.fnfGroups.forEach((g) => bump(counts.byGroup, g));
     }
 
     const viewCounts: Record<string, number> = {
@@ -293,12 +288,10 @@ export class KolIndexService implements OnModuleInit {
     const tiers = asSet(q.tiers);
     const types = asSet(q.types);
     const squadsF = asSet(q.squads);
-    const groupsF = asSet(q.groups);
     const filtered = base.filter((st) => {
       if (tiers.size && !tiers.has(tierOf(st.relevance))) return false;
       if (types.size && !st.types.some((t) => types.has(t))) return false;
       if (squadsF.size && !st.squads.some((x) => squadsF.has(x))) return false;
-      if (groupsF.size && !st.fnfGroups.some((g) => groupsF.has(g))) return false;
       return true;
     });
 
@@ -325,26 +318,23 @@ export class KolIndexService implements OnModuleInit {
       total: filtered.length,
       counts,
       viewCounts,
-      squads: Array.from(new Set(preset.flatMap((p) => p.squads))).sort(),
-      groups: groups.map((g) => ({ id: g.id, name: g.name })),
+      // A faceta lista TODO squad que o usuário enxerga — os do preset e os
+      // que ele mesmo criou —, senão um squad só dele não apareceria na rail.
+      squads: Array.from(new Set(states.flatMap((st) => st.squads))).sort((a, b) =>
+        a.localeCompare(b),
+      ),
     };
   }
 
   /** Estado EFETIVO de UM KOL — o modal abre por aqui. */
   async getOne(userId: string, kolId: string): Promise<KolStateView> {
     const db = this.prisma.getReadClient();
-    const [preset, override, groups] = await Promise.all([
+    const [preset, override] = await Promise.all([
       db.kolPreset.findFirst({ where: { id: kolId, deletedAt: null } }),
       db.kolUserOverride.findUnique({ where: { userId_kolId: { userId, kolId } } }),
-      db.kolUserGroup.findMany({ where: { userId }, select: { id: true } }),
     ]);
     if (!preset && !override) throw new NotFoundException('KOL não encontrado');
-    return this.mergeState(
-      kolId,
-      preset,
-      override,
-      new Set(groups.map((g) => g.id)),
-    );
+    return this.mergeState(kolId, preset, override);
   }
 
   /**
@@ -367,7 +357,7 @@ export class KolIndexService implements OnModuleInit {
       name: string | null;
       relevance: number | null;
       types: Prisma.JsonValue | null;
-      fnfGroups: Prisma.JsonValue | null;
+      squads: Prisma.JsonValue | null;
       twitter: string | null;
       notes: string | null;
       avatar: string | null;
@@ -376,7 +366,6 @@ export class KolIndexService implements OnModuleInit {
       dismissedSidewallets: Prisma.JsonValue | null;
       isCustom: boolean;
     } | null | undefined,
-    knownGroups: Set<string>,
   ): KolStateView {
     const presetWallets = this.asWalletArray(p?.wallets ?? null) ?? [];
     const removed = new Set(this.asStringArray(o?.walletsRemoved ?? null) ?? []);
@@ -384,19 +373,31 @@ export class KolIndexService implements OnModuleInit {
       .filter((w) => !removed.has(w.address))
       .concat(this.asWalletArray(o?.walletsAdded ?? null) ?? []);
 
+    // Squad do preset e squad da conta são a MESMA coisa para quem lê: o
+    // efetivo é a união, sem repetir e sem deixar de marcar qual veio da conta
+    // (só esse o usuário pode tirar). Dedup case-insensitive porque "Lair" e
+    // "lair" viram duas facetas na rail e o usuário lê como uma.
+    const ownSquads = this.asStringArray(o?.squads ?? null) ?? [];
+    const squads: string[] = [];
+    const seenSquad = new Set<string>();
+    for (const name of [...(p?.squads ?? []), ...ownSquads]) {
+      const key = name.trim().toLowerCase();
+      if (!key || seenSquad.has(key)) continue;
+      seenSquad.add(key);
+      squads.push(name.trim());
+    }
+
     return {
       id: kolId,
       name: o?.name?.trim() || p?.name || 'Sem nome',
       wallets,
       walletCount: wallets.length,
-      squads: p?.squads ?? [],
+      squads,
+      ownSquads,
       seedRelevance: p?.relevance ?? 20,
       isCustom: !p,
       relevance: o?.relevance ?? p?.relevance ?? 20,
       types: this.asStringArray(o?.types ?? null) ?? p?.types ?? [],
-      fnfGroups: (this.asStringArray(o?.fnfGroups ?? null) ?? []).filter((g) =>
-        knownGroups.has(g),
-      ),
       twitter: o?.twitter ?? p?.twitter ?? '',
       notes: o?.notes ?? p?.notes ?? '',
       avatar: o?.avatar === '' ? null : (o?.avatar ?? p?.avatar ?? null),
@@ -472,43 +473,41 @@ export class KolIndexService implements OnModuleInit {
 
   /** Apaga TODAS as edições da conta — os KOLs voltam ao preset puro. */
   async resetAll(userId: string): Promise<{ ok: true }> {
-    const db = this.prisma.getWriteClient();
-    await db.$transaction([
-      db.kolUserOverride.deleteMany({ where: { userId } }),
-      db.kolUserGroup.deleteMany({ where: { userId } }),
-    ]);
+    // Os squads da conta vivem DENTRO do override, então apagar os overrides
+    // já os leva junto — não sobrou tabela separada para limpar.
+    await this.prisma.getWriteClient().kolUserOverride.deleteMany({ where: { userId } });
     return { ok: true };
   }
 
   /**
    * Restaura um backup NA CONTA, numa chamada só (o front não dispara N
-   * requests). Grupos são recriados por nome e `fnfGroups` é remapeado para os
-   * ids desta conta. Um `kolId` desconhecido entra como KOL custom — é como um
-   * KOL criado pelo usuário chega no arquivo.
+   * requests). Um `kolId` desconhecido entra como KOL custom — é como um KOL
+   * criado pelo usuário chega no arquivo.
+   *
+   * Backups ANTIGOS (anteriores à unificação squad/grupo) trazem `groups`
+   * [{id,name}] e `fnfGroups` com ids; aqui os ids viram nomes de squad pela
+   * tabela do próprio arquivo, então nada do que o usuário marcou se perde.
    */
   async importBackup(
     userId: string,
     dto: ImportKolBackupDto,
-  ): Promise<{ imported: number; groups: KolGroupView[] }> {
-    // 1) Grupos: id do arquivo → id desta conta.
-    const idMap = new Map<string, string>();
-    for (const g of dto.groups ?? []) {
-      const created = await this.createGroup(userId, g.name);
-      idMap.set(g.id, created.id);
-    }
+  ): Promise<{ imported: number }> {
+    // 1) Backup antigo: id do grupo no arquivo → nome do squad.
+    const legacyNames = new Map((dto.groups ?? []).map((g) => [g.id, g.name]));
 
-    // 2) Overrides, com as referências de grupo já traduzidas.
     const db = this.prisma.getWriteClient();
     const presetIds = new Set(
       (await db.kolPreset.findMany({ select: { id: true } })).map((p) => p.id),
     );
 
     let imported = 0;
-    for (const { kolId, ...patch } of dto.overrides ?? []) {
-      if (patch.fnfGroups) {
-        patch.fnfGroups = patch.fnfGroups
-          .map((g) => idMap.get(g) ?? g)
-          .filter((g) => [...idMap.values()].includes(g));
+    for (const { kolId, fnfGroups, ...patch } of dto.overrides ?? []) {
+      // `squads` do arquivo novo vence; `fnfGroups` só entra traduzido, e um id
+      // sem nome conhecido é descartado (era ponteiro para grupo de outra conta).
+      if (patch.squads === undefined && fnfGroups) {
+        patch.squads = fnfGroups
+          .map((g) => legacyNames.get(g))
+          .filter((n): n is string => Boolean(n));
       }
       const data = this.overrideData(patch);
       const isCustom = !presetIds.has(kolId);
@@ -520,62 +519,73 @@ export class KolIndexService implements OnModuleInit {
       imported++;
     }
 
-    const groups = await db.kolUserGroup.findMany({
-      where: { userId },
-      orderBy: { name: 'asc' },
-    });
-    return { imported, groups: groups.map((g) => ({ id: g.id, name: g.name })) };
+    return { imported };
   }
 
-  // ── Grupos / FnFs do usuário ───────────────────────────────────────────────
+  // ── Squads da conta ────────────────────────────────────────────────────────
 
-  /** Cria o grupo — ou devolve o existente de mesmo nome (idempotente). */
-  async createGroup(userId: string, name: string): Promise<KolGroupView> {
+  /**
+   * Reescreve os squads DA CONTA em todos os KOLs, aplicando `next` a cada
+   * lista. Devolve quantos KOLs mudaram.
+   *
+   * Filtra em memória: o volume por conta é pequeno e um filtro sobre coluna
+   * Json no Prisma exigiria `{ not: DbNull }`, que não cobre "não é array".
+   * Só os squads da conta são tocados — os do preset são globais e um usuário
+   * não pode renomear nem apagar o squad de todo mundo por aqui.
+   */
+  private async rewriteOwnSquads(
+    userId: string,
+    next: (squads: string[]) => string[],
+  ): Promise<{ updated: number }> {
     const db = this.prisma.getWriteClient();
-    const existing = await db.kolUserGroup.findFirst({
-      where: { userId, name: { equals: name, mode: 'insensitive' } },
-    });
-    if (existing) return { id: existing.id, name: existing.name };
-    const row = await db.kolUserGroup.create({ data: { userId, name } });
-    return { id: row.id, name: row.name };
-  }
-
-  async renameGroup(userId: string, id: string, name: string): Promise<KolGroupView> {
-    const { count } = await this.prisma
-      .getWriteClient()
-      .kolUserGroup.updateMany({ where: { id, userId }, data: { name } });
-    if (!count) throw new NotFoundException('Grupo não encontrado');
-    return { id, name };
-  }
-
-  /** Remove o grupo E a referência a ele nos overrides do MESMO usuário. */
-  async deleteGroup(userId: string, id: string): Promise<{ ok: true }> {
-    const db = this.prisma.getWriteClient();
-    const { count } = await db.kolUserGroup.deleteMany({ where: { id, userId } });
-    if (!count) throw new NotFoundException('Grupo não encontrado');
-
-    // Filtra em memória: o volume por conta é pequeno e um filtro de Json nulo
-    // no Prisma exigiria `{ not: DbNull }`, que não cobre o caso "não é array".
-    const affected = await db.kolUserOverride.findMany({
+    const rows = await db.kolUserOverride.findMany({
       where: { userId },
-      select: { id: true, fnfGroups: true },
+      select: { id: true, squads: true },
     });
+
+    const changes = rows
+      .map((r) => ({ id: r.id, squads: this.asStringArray(r.squads) ?? [] }))
+      .map((r) => ({ id: r.id, squads: r.squads, wanted: next(r.squads) }))
+      .filter((r) => r.wanted.join('\u0000') !== r.squads.join('\u0000'));
+
     await Promise.all(
-      affected
-        .map((o) => ({ id: o.id, groups: this.asStringArray(o.fnfGroups) }))
-        .filter((o) => o.groups?.includes(id))
-        .map((o) =>
-          db.kolUserOverride.update({
-            where: { id: o.id },
-            data: {
-              fnfGroups: (o.groups ?? []).filter(
-                (g) => g !== id,
-              ) as unknown as Prisma.InputJsonValue,
-            },
-          }),
-        ),
+      changes.map((r) =>
+        db.kolUserOverride.update({
+          where: { id: r.id },
+          data: { squads: r.wanted as unknown as Prisma.InputJsonValue },
+        }),
+      ),
     );
-    return { ok: true };
+    return { updated: changes.length };
+  }
+
+  /** Renomeia um squad da conta em todos os KOLs dela. */
+  async renameSquad(userId: string, from: string, to: string): Promise<{ updated: number }> {
+    const target = to.trim();
+    if (!target) throw new NotFoundException('Nome de squad inválido');
+    const key = from.trim().toLowerCase();
+    return this.rewriteOwnSquads(userId, (squads) => {
+      if (!squads.some((s) => s.trim().toLowerCase() === key)) return squads;
+      // Dedup: renomear "Lair" para um nome que o KOL já tem não pode duplicar.
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const s of squads) {
+        const name = s.trim().toLowerCase() === key ? target : s;
+        const k = name.trim().toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(name);
+      }
+      return out;
+    });
+  }
+
+  /** Tira um squad da conta de todos os KOLs dela. */
+  async deleteSquad(userId: string, name: string): Promise<{ updated: number }> {
+    const key = name.trim().toLowerCase();
+    return this.rewriteOwnSquads(userId, (squads) =>
+      squads.filter((s) => s.trim().toLowerCase() !== key),
+    );
   }
 
   /**
@@ -587,21 +597,17 @@ export class KolIndexService implements OnModuleInit {
     exportedAt: string;
     overrides: Record<string, unknown>;
     customIds: string[];
-    groups: KolGroupView[];
   }> {
     const db = this.prisma.getReadClient();
-    const [rows, groups] = await Promise.all([
-      db.kolUserOverride.findMany({ where: { userId } }),
-      db.kolUserGroup.findMany({ where: { userId }, orderBy: { name: 'asc' } }),
-    ]);
+    const rows = await db.kolUserOverride.findMany({ where: { userId } });
     const overrides: Record<string, unknown> = {};
     for (const r of rows) {
-      const { kolId, name, relevance, types, fnfGroups, twitter, notes, avatar } = r;
+      const { kolId, name, relevance, types, squads, twitter, notes, avatar } = r;
       overrides[kolId] = {
         name,
         relevance,
         types,
-        fnfGroups,
+        squads,
         twitter,
         notes,
         avatar,
@@ -616,7 +622,6 @@ export class KolIndexService implements OnModuleInit {
       exportedAt: new Date().toISOString(),
       overrides,
       customIds: rows.filter((r) => r.isCustom).map((r) => r.kolId),
-      groups: groups.map((g) => ({ id: g.id, name: g.name })),
     };
   }
 
@@ -771,7 +776,7 @@ export class KolIndexService implements OnModuleInit {
     if (dto.avatar !== undefined) data.avatar = dto.avatar;
     if (dto.deleted !== undefined) data.deleted = dto.deleted;
     if (dto.types !== undefined) data.types = this.json(dto.types);
-    if (dto.fnfGroups !== undefined) data.fnfGroups = this.json(dto.fnfGroups);
+    if (dto.squads !== undefined) data.squads = this.json(dto.squads);
     if (dto.walletsAdded !== undefined) data.walletsAdded = this.json(dto.walletsAdded);
     if (dto.walletsRemoved !== undefined) data.walletsRemoved = this.json(dto.walletsRemoved);
     if (dto.dismissedSidewallets !== undefined) {
@@ -822,7 +827,7 @@ export class KolIndexService implements OnModuleInit {
     name: string | null;
     relevance: number | null;
     types: Prisma.JsonValue | null;
-    fnfGroups: Prisma.JsonValue | null;
+    squads: Prisma.JsonValue | null;
     twitter: string | null;
     notes: string | null;
     avatar: string | null;
@@ -838,7 +843,7 @@ export class KolIndexService implements OnModuleInit {
       name: r.name,
       relevance: r.relevance,
       types: this.asStringArray(r.types),
-      fnfGroups: this.asStringArray(r.fnfGroups),
+      squads: this.asStringArray(r.squads),
       twitter: r.twitter,
       notes: r.notes,
       avatar: r.avatar,

@@ -68,7 +68,6 @@ model User {
   catalog         WalletCatalog[]
   favoriteAuthors FavoriteAuthor[]
   kolOverrides    KolUserOverride[]
-  kolGroups       KolUserGroup[]
 
   @@index([googleId])
   @@index([deletedAt])
@@ -689,7 +688,12 @@ model KolUserOverride {
   name      String?
   relevance Int?
   types     Json? // string[] | null
-  fnfGroups Json? // string[] | null — ids de KolUserGroup
+  // Squads da CONTA: string[] | null — NOMES livres. O estado efetivo do KOL é
+  // a união destes com os `squads` do preset; estes são os que o usuário pode
+  // tirar. Substituiu `fnfGroups` (ids de KolUserGroup): grupo/FnF e squad eram
+  // o mesmo conceito com dois modelos, e a rail acabava com duas facetas que
+  // filtravam em AND.
+  squads    Json?
   twitter   String?
   notes     String?
   // null = herda o avatar do preset; "" = o usuário LIMPOU (volta ao hash).
@@ -708,19 +712,5 @@ model KolUserOverride {
   updatedAt DateTime @updatedAt
 
   @@unique([userId, kolId])
-  @@index([userId])
-}
-
-// Grupo/FnF criado por um usuário para organizar os KOLs na conta dele.
-model KolUserGroup {
-  id     String @id @default(cuid())
-  userId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  name String
-
-  createdAt DateTime @default(now())
-
-  @@unique([userId, name])
   @@index([userId])
 }

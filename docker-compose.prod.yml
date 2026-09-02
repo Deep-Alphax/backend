@@ -9,7 +9,13 @@
 #    -> DB e cache ficam inacessíveis da internet; menor superfície de ataque.
 #  - Dentro da rede Docker os hosts são os NOMES dos serviços: `postgres`/`redis`
 #    nas portas padrão 5432/6379 (o remapeamento 5433/6380 era só p/ o host dev).
+#
+# `name:` fixa o *project name*. Sem ele o Compose usa o nome da PASTA em que o
+# arquivo está (/srv/backend -> `backend`), prefixo genérico que colide com
+# qualquer outro projeto num diretório `backend` no mesmo host.
 # ─────────────────────────────────────────────────────────────────────────────
+name: deepalpha
+
 services:
   app:
     build:
@@ -105,8 +111,18 @@ services:
 
 networks:
   deepalpha:
+    name: deepalpha
     driver: bridge
 
 volumes:
+  # `name:` explícito -> o volume NÃO herda o prefixo do project name.
+  #
+  # Os nomes abaixo são os que a VPS JÁ TEM em disco (criados quando o project
+  # name era `backend`). Fixá-los aqui é o que faz a troca do project name ser
+  # zero-touch: o Postgres reabre exatamente o mesmo volume, sem migrar nada.
+  # NÃO renomeie sem antes copiar os dados (ver DEPLOY.md > "Trocar o project
+  # name na VPS"). Em dev os nomes são `deepalpha_*` — lá o volume era descartável.
   deepalpha_pgdata:
+    name: backend_deepalpha_pgdata
   deepalpha_redisdata:
+    name: backend_deepalpha_redisdata

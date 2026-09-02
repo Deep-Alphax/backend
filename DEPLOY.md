@@ -156,6 +156,57 @@ As migrations rodam automaticamente no start. Zero passos manuais.
 
 ---
 
+## Trocar o project name na VPS (uma vez só)
+
+Os composes agora declaram `name: deepalpha`. Antes disso o Compose derivava o
+*project name* da pasta (`/srv/backend` -> `backend`) — prefixo genérico que colide
+com qualquer outro projeto num diretório `backend` no mesmo host.
+
+**Os volumes NÃO mudam.** O `docker-compose.prod.yml` fixa `name:` neles apontando
+para os volumes que a VPS já tem (`backend_deepalpha_pgdata`/`_redisdata`), então o
+Postgres reabre o mesmo disco. O que muda é só a rede e o dono dos containers.
+
+O único passo manual existe porque `container_name` é fixo (`deepalpha-app` etc.) e
+o Docker recusa reusar um nome que pertence a containers de outro projeto:
+
+```
+Conflict. The container name "/deepalpha-app" is already in use
+```
+
+### Passos
+
+```bash
+cd /srv/backend
+
+# 0) BACKUP lógico do banco (rede/segurança: roda dentro do container, nada exposto)
+docker compose -p backend -f docker-compose.prod.yml exec -T postgres \
+  pg_dump -U deepalpha -d deepalpha --format=custom > ~/deepalpha-$(date +%F-%H%M).dump
+ls -lh ~/deepalpha-*.dump   # confira que NÃO está com 0 bytes antes de seguir
+
+# 1) confirme os nomes dos volumes que existem hoje (têm de bater com o compose)
+docker volume ls | grep deepalpha
+
+# 2) remove os containers do project antigo. SEM -v: os volumes ficam intactos.
+docker compose -p backend -f docker-compose.prod.yml down
+
+# 3) sobe sob o project name novo, reusando os mesmos volumes
+docker compose -f docker-compose.prod.yml up -d
+
+# 4) verifique
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U deepalpha -d deepalpha -c '\dt'
+curl -fsS http://127.0.0.1:3333/health
+```
+
+> ⚠️ **Nunca** use `-v` no `down` (nem `docker volume prune`) nesta stack: é o
+> flag que apaga `backend_deepalpha_pgdata`. O passo 2 acima é sem `-v` de propósito.
+
+Se o passo 3 falhar, nada foi perdido — os volumes seguem lá. Basta voltar com
+`docker compose -p backend -f docker-compose.prod.yml up -d` e investigar.
+
+---
+
 ## Ponto de atenção: pasta `uploads/`
 
 A pasta `uploads/` (avatares re-hospedados) é **efêmera** no container — some a cada
