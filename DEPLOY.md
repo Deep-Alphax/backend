@@ -132,7 +132,7 @@ Caddy resolve o certificado Let's Encrypt sozinho. (Nginx + certbot também func
 ## 6. Atualizações futuras (redeploy)
 
 ```bash
-cd /opt/deepalpha/backend
+cd /srv/backend   # mesmo diretório usado pelo deploy.yml
 git pull
 docker compose -f docker-compose.prod.yml up -d --build
 ```
@@ -157,6 +157,10 @@ As migrations rodam automaticamente no start. Zero passos manuais.
 ---
 
 ## Trocar o project name na VPS (uma vez só)
+
+> **Já é automático.** O `deploy.yml` roda esse `down` do project antigo antes do
+> `up -d` (bloco "Migração one-shot", idempotente). Os passos manuais abaixo só são
+> necessários se você preferir fazer na mão / o CI não estiver disponível.
 
 Os composes agora declaram `name: deepalpha`. Antes disso o Compose derivava o
 *project name* da pasta (`/srv/backend` -> `backend`) — prefixo genérico que colide

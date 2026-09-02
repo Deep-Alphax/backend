@@ -101,6 +101,23 @@ jobs:
             cd /srv/backend
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             export IMAGE_TAG="$IMAGE_TAG"
+
+            # ── Migração one-shot do project name (`backend` -> `deepalpha`) ────────
+            # O compose passou a declarar `name: deepalpha`; antes o project name vinha
+            # da pasta (/srv/backend -> `backend`). Como os `container_name` são fixos
+            # (deepalpha-app/postgres/redis), os containers do project antigo seguram
+            # esses nomes e o `up -d` abaixo falha com "container name is already in use".
+            #
+            # `down` SEM `-v`: remove só os containers/rede do project antigo. Os volumes
+            # (backend_deepalpha_pgdata/_redisdata) NÃO são tocados — e o compose novo
+            # aponta `name:` exatamente para eles, então o Postgres reabre o mesmo disco.
+            # Idempotente: depois da primeira execução o `ps -q` vem vazio e isto é no-op,
+            # então este bloco pode ser removido num commit futuro.
+            if [ -n "$(docker compose -p backend -f docker-compose.prod.yml ps -aq)" ]; then
+              echo "[deploy] Removendo containers do project antigo 'backend' (volumes preservados)..."
+              docker compose -p backend -f docker-compose.prod.yml down
+            fi
+
             # Puxa a imagem exata deste commit e recria só o app (db/redis seguem de pé).
             docker compose -f docker-compose.prod.yml pull app
             docker compose -f docker-compose.prod.yml up -d
