@@ -21,6 +21,7 @@ import { isTrustedOrigin } from './common/config/allowed-origins';
 
 type RequestWithRawBody = Request & { rawBody?: Buffer };
 
+
 initializeSentry();
 
 process.on('uncaughtException', (error) => {
