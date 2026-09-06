@@ -12,7 +12,7 @@ export interface CandleFull {
   timeMs: number;
   high: number;
   close: number;
-}
+} 
 
 /**
  * Cache de candles OHLC (Bloco 2). Lê do banco (`TokenCandle`); em falta, busca
