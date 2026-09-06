@@ -69,6 +69,7 @@ model User {
   favoriteAuthors FavoriteAuthor[]
   kolOverrides    KolUserOverride[]
   subscription    Subscription?
+  lessonProgress  LessonProgress[]
 
   @@index([googleId])
   @@index([deletedAt])
@@ -783,4 +784,97 @@ model KolUserOverride {
 
   @@unique([userId, kolId])
   @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mentoria — trilhas, aulas e progresso
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cor de acento da barra de progresso de uma trilha. Guardamos o NOME do
+/// token (não o hex) para a paleta continuar sendo decidida no front — trocar
+/// o valor de `--color-green-11` não exige migration.
+enum MentorshipAccent {
+  PRINCIPAL
+  GREEN
+  AZUL
+  VIOLETA
+}
+
+/// Trilha (o "módulo" da tela): agrupa aulas em ordem.
+model MentorshipModule {
+  id   String @id @default(cuid())
+  /// Identificador estável usado na URL (/mentorship/<slug>). Trocar o título
+  /// não deve quebrar link já compartilhado, por isso slug é campo próprio.
+  slug String @unique
+
+  title    String
+  subtitle String @default("")
+  /// Rótulo curto ao lado do título ("Module 1"). Livre de propósito: a
+  /// numeração exibida nem sempre acompanha `position` (módulo bônus, extra).
+  label    String @default("")
+  coverUrl String @default("")
+
+  accent    MentorshipAccent @default(PRINCIPAL)
+  /// Ordem na tela. Inteiro esparso: reordenar reescreve só as linhas movidas.
+  position  Int              @default(0)
+  /// Rascunho não aparece para o usuário — só na tela de admin.
+  published Boolean          @default(true)
+
+  lessons MentorshipLesson[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([published, position])
+}
+
+/// Aula. `onDelete: Cascade` no módulo: aula não existe fora de uma trilha.
+model MentorshipLesson {
+  id       String           @id @default(cuid())
+  moduleId String
+  module   MentorshipModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String @default("")
+  /// Número exibido no badge ("EP 04"). Separado de `position` porque o
+  /// episódio é parte do nome da aula e não muda ao reordenar a esteira.
+  episode     Int    @default(1)
+  /// Duração em SEGUNDOS. Inteiro, não string formatada: o "14:20" e o
+  /// "faltam 6min" são derivados na leitura.
+  durationSec Int    @default(0)
+  coverUrl    String @default("")
+  videoUrl    String @default("")
+
+  position  Int     @default(0)
+  published Boolean @default(true)
+
+  progress LessonProgress[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([moduleId, position])
+}
+
+/// Progresso de UM usuário em UMA aula. É a fonte do "Continue where you left
+/// off" e das porcentagens da trilha.
+model LessonProgress {
+  id       String           @id @default(cuid())
+  userId   String
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId String
+  lesson   MentorshipLesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  /// Onde o vídeo parou, em segundos.
+  positionSec Int       @default(0)
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, lessonId])
+  /// "Continue de onde parou" = a linha mais recente do usuário. Sem este
+  /// índice a consulta varre todo o progresso da base a cada abertura da tela.
+  @@index([userId, updatedAt(sort: Desc)])
 }

@@ -1,0 +1,180 @@
+[
+  {
+    "slug": "on-chain-fundamentals",
+    "title": "On-chain fundamentals",
+    "label": "Module 1",
+    "subtitle": "Wallet, RPC, fee, gas, tip and slippage. What every button actually does before you press it.",
+    "coverUrl": "/mentorship/module-market.webp",
+    "accent": "GREEN",
+    "lessons": [
+      {
+        "title": "How a Solana transaction really happens",
+        "description": "From the click to the confirmed block: what gets signed, who relays it and where it can silently die.",
+        "durationSec": 860,
+        "coverUrl": "/mentorship/lesson-internet.webp"
+      },
+      {
+        "title": "Wallets, seed phrases and the keys you must never paste",
+        "description": "Custody in practice — what lives on your device, what lives on the chain, and the exact moment people lose everything.",
+        "durationSec": 742,
+        "coverUrl": "/mentorship/lesson-assets.webp"
+      },
+      {
+        "title": "Fee, gas and priority tip",
+        "description": "Three numbers people mix up. What each one pays for and which of them decides whether you land the block.",
+        "durationSec": 655,
+        "coverUrl": "/mentorship/lesson-mindset.webp"
+      },
+      {
+        "title": "RPC, latency and why you arrive late",
+        "description": "The gap between a public RPC and a dedicated one, measured in milliseconds, and what that means when fifteen wallets fight over the same block.",
+        "durationSec": 1005,
+        "coverUrl": "/mentorship/lesson-cycles.webp"
+      },
+      {
+        "title": "Slippage: the setting that eats your entry",
+        "description": "Why a wide tolerance turns a good entry into a bad one, and how to size it against real liquidity.",
+        "durationSec": 588,
+        "coverUrl": "/mentorship/lesson-altcoins.webp"
+      },
+      {
+        "title": "Reading a transaction on the explorer",
+        "description": "Instructions, transfers and program logs — the three panes that tell you what actually happened.",
+        "durationSec": 934,
+        "coverUrl": "/mentorship/lesson-internet.webp"
+      }
+    ]
+  },
+  {
+    "slug": "working-the-radar",
+    "title": "Working the Radar",
+    "label": "Module 2",
+    "subtitle": "Sources, channels, call owners, tier and voice. Pulling signal out of 1,542 messages a day.",
+    "coverUrl": "/mentorship/module-technical.webp",
+    "accent": "PRINCIPAL",
+    "lessons": [
+      {
+        "title": "Setting up your first sources",
+        "description": "Which channels are worth listening to and how to tell a call apart from noise on day one.",
+        "durationSec": 712,
+        "coverUrl": "/mentorship/lesson-cycles.webp"
+      },
+      {
+        "title": "Tiers: who lands it, who repeats it, who only talks",
+        "description": "The classification behind the feed and how it changes what deserves your attention.",
+        "durationSec": 869,
+        "coverUrl": "/mentorship/lesson-mindset.webp"
+      },
+      {
+        "title": "Call owners and attribution",
+        "description": "Who called it first, who copied it, and why that order is the whole story.",
+        "durationSec": 640,
+        "coverUrl": "/mentorship/lesson-assets.webp"
+      },
+      {
+        "title": "Alerts that are worth waking up for",
+        "description": "Building filters that fire rarely and mean something when they do.",
+        "durationSec": 553,
+        "coverUrl": "/mentorship/lesson-altcoins.webp"
+      },
+      {
+        "title": "Reading the feed under pressure",
+        "description": "What to look at first when three calls land in the same minute.",
+        "durationSec": 947,
+        "coverUrl": "/mentorship/lesson-internet.webp"
+      },
+      {
+        "title": "Squads: organising who you follow",
+        "description": "Grouping wallets by behaviour instead of by name, and why that survives contact with reality.",
+        "durationSec": 601,
+        "coverUrl": "/mentorship/lesson-cycles.webp"
+      }
+    ]
+  },
+  {
+    "slug": "read-a-token-in-60-seconds",
+    "title": "Read a token in 60 seconds",
+    "label": "Module 3",
+    "subtitle": "LP, dev, top 10, snipers, insiders and bundlers. The Rick Bot X-ray, taken apart.",
+    "coverUrl": "/mentorship/module-risk.webp",
+    "accent": "AZUL",
+    "lessons": [
+      {
+        "title": "Liquidity: how much and whose",
+        "description": "Where the pool came from, whether it is locked, and what happens the second it is not.",
+        "durationSec": 688,
+        "coverUrl": "/mentorship/lesson-mindset.webp"
+      },
+      {
+        "title": "The dev wallet and its history",
+        "description": "What the deployer did before this token, and why that is the single fastest read available.",
+        "durationSec": 795,
+        "coverUrl": "/mentorship/lesson-altcoins.webp"
+      },
+      {
+        "title": "Top 10 holders and concentration",
+        "description": "Reading the distribution without fooling yourself with wallets that belong to the same person.",
+        "durationSec": 623,
+        "coverUrl": "/mentorship/lesson-cycles.webp"
+      },
+      {
+        "title": "Snipers, insiders and bundlers",
+        "description": "Three patterns in the first block that decide whether there is a trade here at all.",
+        "durationSec": 1024,
+        "coverUrl": "/mentorship/lesson-assets.webp"
+      },
+      {
+        "title": "Mint, freeze and the authorities that matter",
+        "description": "The permissions still held by the contract and what each one lets someone do to you.",
+        "durationSec": 574,
+        "coverUrl": "/mentorship/lesson-internet.webp"
+      },
+      {
+        "title": "The 60-second checklist, end to end",
+        "description": "Running the whole read on a live token, in order, out loud.",
+        "durationSec": 1180,
+        "coverUrl": "/mentorship/lesson-mindset.webp"
+      }
+    ]
+  },
+  {
+    "slug": "exit-and-post-trade",
+    "title": "Exit & post-trade",
+    "label": "Module 4",
+    "subtitle": "Position sizing, partial exits and the log that turns a trade into a lesson.",
+    "coverUrl": "/mentorship/module-longterm.webp",
+    "accent": "VIOLETA",
+    "lessons": [
+      {
+        "title": "Sizing before you are excited",
+        "description": "Deciding the number while it is still cheap to be honest about it.",
+        "durationSec": 667,
+        "coverUrl": "/mentorship/lesson-altcoins.webp"
+      },
+      {
+        "title": "Partial exits without regret",
+        "description": "Taking the position off in pieces, and why the first piece is the one that matters.",
+        "durationSec": 810,
+        "coverUrl": "/mentorship/lesson-cycles.webp"
+      },
+      {
+        "title": "Stops that survive volatility",
+        "description": "Placing the invalidation where the thesis dies, not where the chart looks scary.",
+        "durationSec": 736,
+        "coverUrl": "/mentorship/lesson-assets.webp"
+      },
+      {
+        "title": "The trade log",
+        "description": "What to write down at the close so the next trade is different from this one.",
+        "durationSec": 542,
+        "coverUrl": "/mentorship/lesson-internet.webp"
+      },
+      {
+        "title": "Reading your own numbers",
+        "description": "Turning your PnL history into two or three decisions you can actually change.",
+        "durationSec": 968,
+        "coverUrl": "/mentorship/lesson-mindset.webp"
+      }
+    ]
+  }
+]
