@@ -68,9 +68,79 @@ model User {
   catalog         WalletCatalog[]
   favoriteAuthors FavoriteAuthor[]
   kolOverrides    KolUserOverride[]
+  subscription    Subscription?
 
   @@index([googleId])
   @@index([deletedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Billing / Assinaturas
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Planos do produto. FREE não é uma linha no banco: é o que sobra quando não há
+/// assinatura viva. Assim não existe estado divergente entre um campo
+/// `user.plan` e a assinatura real.
+enum Plan {
+  FREE
+  PRO
+}
+
+/// Provedor de cobrança. Enum (e não string livre) porque a escolha muda regra
+/// de negócio — hoje só Stripe; cripto provavelmente exigirá um segundo, já que
+/// a conta Stripe BR não cobre stablecoin.
+enum BillingProvider {
+  STRIPE
+}
+
+/// Ciclo de vida da assinatura. Deliberadamente NÃO é cópia 1:1 dos status de um
+/// provedor: aqui só precisa dar para responder se concede acesso ou não.
+enum SubscriptionStatus {
+  INCOMPLETE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+model Subscription {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  plan   Plan               @default(PRO)
+  status SubscriptionStatus @default(INCOMPLETE)
+
+  provider               BillingProvider @default(STRIPE)
+  /// Cliente no provedor — reaproveitado entre assinaturas do mesmo usuário.
+  providerCustomerId     String?
+  /// Assinatura no provedor. Único: o webhook faz upsert por este campo.
+  providerSubscriptionId String?         @unique
+
+  /// Fim do ciclo pago. O acesso expira aqui MESMO que o webhook de cancelamento
+  /// nunca chegue — é o que impede PRO vitalício por falha de entrega.
+  currentPeriodEnd  DateTime?
+  cancelAtPeriodEnd Boolean   @default(false)
+  canceledAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, currentPeriodEnd])
+  @@index([providerCustomerId])
+}
+
+/// Idempotência de webhook. O provedor REENTREGA eventos; reprocessar um
+/// `invoice.paid` estenderia o período duas vezes. A PK é o id do evento no
+/// provedor, então o INSERT duplicado falha e o handler sai sem efeito colateral.
+model BillingEvent {
+  /// Id do evento no provedor (ex.: `evt_…` no Stripe).
+  id          String          @id
+  provider    BillingProvider @default(STRIPE)
+  type        String
+  processedAt DateTime        @default(now())
+
+  @@index([provider, type])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

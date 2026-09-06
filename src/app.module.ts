@@ -15,6 +15,7 @@ import { SourcesModule } from './app/sources/sources.module';
 import { EventsModule } from './app/events/events.module';
 import { FeedModule } from './app/feed/feed.module';
 import { WalletReaderModule } from './app/wallet-reader/wallet-reader.module';
+import { BillingModule } from './app/billing/billing.module';
 import { getCacheConfig } from './config/cache.config';
 import { IpThrottlerGuard } from './common/guards/ip-throttler.guard';
 import { RequestOriginGuard } from './common/guards/request-origin.guard';
@@ -45,6 +46,7 @@ import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-li
     EventsModule,
     FeedModule,
     WalletReaderModule,
+    BillingModule,
   ],
   providers: [
     ConcurrencyLimiterMiddleware,
