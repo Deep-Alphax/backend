@@ -35,7 +35,7 @@ export class BlacklistService {
     const discordUserId = dto.discordUserId?.trim() || null;
     const username = dto.username?.trim() || null;
     if (!discordUserId && !username) {
-      throw new BadRequestException('Informe discordUserId ou username');
+      throw new BadRequestException('Provide discordUserId or username');
     }
     const entry = await this.prisma.getWriteClient().blacklistedUser.create({
       data: {
@@ -83,7 +83,7 @@ export class BlacklistService {
     const entry = await this.prisma
       .getReadClient()
       .blacklistedUser.findUnique({ where: { id } });
-    if (!entry) throw new NotFoundException('Entrada não encontrada');
+    if (!entry) throw new NotFoundException('Entry not found');
     return entry;
   }
 }

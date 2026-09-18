@@ -40,8 +40,11 @@ function makeService() {
   };
   // UsersService: só o fluxo Google usa; devolve o usuário sem alterar (avatar).
   const users: any = { hydrateGoogleAvatar: jest.fn((u: any) => Promise.resolve(u)) };
-  const service = new AuthService(jwt, config, prisma, cache, http, email, users);
-  return { service, client, cache, store, jwt, email, config, users };
+  // AffiliatesService: o cadastro resolve o código de indicação. Por padrão
+  // devolve null (sem link de afiliado), que é o caminho da maioria dos testes.
+  const affiliates: any = { resolveReferrer: jest.fn().mockResolvedValue(null) };
+  const service = new AuthService(jwt, config, prisma, cache, http, email, users, affiliates);
+  return { service, client, cache, store, jwt, email, config, users, affiliates };
 }
 
 describe('AuthService', () => {
@@ -150,7 +153,7 @@ describe('AuthService', () => {
 
     it('rejeita quando não há código no cache', async () => {
       const { service } = makeService();
-      await expect(service.enable2FA('u1', '123456')).rejects.toThrow(/expirado/);
+      await expect(service.enable2FA('u1', '123456')).rejects.toThrow(/expired/i);
     });
   });
 
@@ -230,6 +233,38 @@ describe('AuthService', () => {
       const res: any = await service.validateGoogleUser({ googleId: 'g2', email: 'c@d.com', firstName: 'C', lastName: 'D', avatarUrl: null });
       expect(res.password).toBeNull();
       expect(res.emailVerified).toBe(true);
+    });
+
+    it('atribui a indicação ao criar a conta pelo Google', async () => {
+      const { service, client, affiliates } = makeService();
+      client.user.findFirst.mockResolvedValue(null);
+      client.user.findUnique.mockResolvedValue(null);
+      client.user.create.mockImplementation(({ data }) => Promise.resolve({ id: 'u3', ...data }));
+      affiliates.resolveReferrer.mockResolvedValue('afiliado-1');
+
+      const res: any = await service.validateGoogleUser({
+        googleId: 'g3', email: 'e@f.com', firstName: 'E', lastName: 'F', avatarUrl: null,
+        referralCode: 'deep-alpha',
+      });
+
+      expect(affiliates.resolveReferrer).toHaveBeenCalledWith('deep-alpha');
+      expect(res.referredById).toBe('afiliado-1');
+    });
+
+    it('NÃO regrava o padrinho de uma conta que já existe', async () => {
+      // Senão bastaria um login seguinte com outro link para roubar a
+      // atribuição de uma venda já feita.
+      const { service, client, affiliates } = makeService();
+      client.user.findFirst.mockResolvedValue({ id: 'u1', email: 'a@b.com', avatarUrl: null });
+      affiliates.resolveReferrer.mockResolvedValue('afiliado-2');
+
+      await service.validateGoogleUser({
+        googleId: 'g1', email: 'a@b.com', firstName: 'A', lastName: 'B', avatarUrl: null,
+        referralCode: 'outro-codigo',
+      });
+
+      expect(client.user.create).not.toHaveBeenCalled();
+      expect(affiliates.resolveReferrer).not.toHaveBeenCalled();
     });
   });
 });

@@ -705,11 +705,11 @@ export class WalletReaderService implements OnModuleInit {
       where: { id: kolId, deletedAt: null },
       select: { id: true, name: true, wallets: true },
     });
-    if (!preset) throw new NotFoundException('KOL não encontrado no preset: ' + kolId);
+    if (!preset) throw new NotFoundException('KOL not found in the preset: ' + kolId);
     const wallets = Array.isArray(preset.wallets)
       ? (preset.wallets as unknown as WalletRef[])
       : [];
-    if (!wallets.length) throw new NotFoundException('KOL sem carteiras: ' + kolId);
+    if (!wallets.length) throw new NotFoundException('KOL has no wallets: ' + kolId);
 
     // A carteira é ESCOLHIDA por quem pede; sem escolha, a primeira. Só aceita
     // endereço que pertence a este KOL — senão viraria varredura arbitrária.
@@ -717,7 +717,7 @@ export class WalletReaderService implements OnModuleInit {
       ? wallets.find((w) => w.address === address)
       : wallets[0];
     if (!target) {
-      throw new NotFoundException('Carteira não pertence a este KOL: ' + address);
+      throw new NotFoundException('This wallet does not belong to this KOL: ' + address);
     }
 
     const existing = await this.prisma
@@ -835,12 +835,12 @@ export class WalletReaderService implements OnModuleInit {
     });
     // A varredura é do preset: um KOL criado por um usuário só existe na conta
     // dele, e o cache de scans (`WalletScan`) não tem dono.
-    if (!preset) throw new NotFoundException('KOL não encontrado no preset: ' + kolId);
+    if (!preset) throw new NotFoundException('KOL not found in the preset: ' + kolId);
     const profileWallets = Array.isArray(preset.wallets)
       ? (preset.wallets as unknown as WalletRef[])
       : [];
     if (!profileWallets.length) {
-      throw new NotFoundException('KOL sem carteiras: ' + kolId);
+      throw new NotFoundException('KOL has no wallets: ' + kolId);
     }
 
     const universe = await this.buildUniverse();

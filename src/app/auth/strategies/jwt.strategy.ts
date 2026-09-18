@@ -48,7 +48,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     // Token de challenge MFA (mfaPending) NÃO dá acesso a rotas protegidas — é
     // consumido só pelo endpoint POST /auth/2fa/verify-login (valida no body).
     if (payload.mfaPending) {
-      throw new UnauthorizedException('MFA não concluído');
+      throw new UnauthorizedException('Two-factor step not completed');
     }
 
     const user = await this.prisma.getReadClient().user.findUnique({
@@ -70,7 +70,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
 
     if (!user || !user.isActive || user.deletedAt) {
-      throw new UnauthorizedException('Usuário não encontrado ou inativo');
+      throw new UnauthorizedException('User not found or inactive');
     }
 
     // Revogação sem denylist: token emitido ANTES da última troca de senha é
@@ -80,7 +80,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       typeof payload.iat === 'number' &&
       payload.iat * 1000 < user.passwordChangedAt.getTime() - 2000
     ) {
-      throw new UnauthorizedException('Sessão expirada — faça login novamente');
+      throw new UnauthorizedException('Your session expired — sign in again');
     }
 
     return {

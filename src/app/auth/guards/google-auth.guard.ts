@@ -28,7 +28,9 @@ export class GoogleAuthGuard extends AuthGuard('google') {
    */
   getAuthenticateOptions(context: ExecutionContext): IAuthModuleOptions {
     const req = context.switchToHttp().getRequest();
-    const state = this.oauthState.sign(req?.query?.redirect_to);
+    // `ref` viaja junto: o Google só ecoa o `state`, então é o único canal que
+    // sobrevive ao consent sem depender do storage do navegador.
+    const state = this.oauthState.sign(req?.query?.redirect_to, req?.query?.ref);
     return { state };
   }
 

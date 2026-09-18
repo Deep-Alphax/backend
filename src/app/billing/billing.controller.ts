@@ -62,7 +62,7 @@ export class BillingController {
     @Headers('stripe-signature') signature: string,
     @Body() _body: unknown,
   ) {
-    if (!signature) throw new BadRequestException('stripe-signature ausente.');
+    if (!signature) throw new BadRequestException('stripe-signature header is missing.');
     const event = this.billing.constructEvent(req.rawBody, signature);
     const { handled } = await this.billing.handleEvent(event);
     return { received: true, handled };

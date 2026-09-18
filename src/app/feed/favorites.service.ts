@@ -154,7 +154,7 @@ export class FavoritesService {
     try {
       processed = await processAvatar(source);
     } catch {
-      throw new BadRequestException('Imagem inválida');
+      throw new BadRequestException('Invalid image');
     }
     const { data, mime } = processed;
     // `authorTag` null → o upsert cai na chave (que já é a tag do autor).

@@ -76,7 +76,7 @@ class KolFieldsDto {
   @IsOptional()
   @MaxLength(AVATAR_MAX)
   @Matches(AVATAR_DATA_URL, {
-    message: 'avatar deve ser uma data URL de imagem (png, jpeg, webp ou gif)',
+    message: 'avatar must be an image data URL (png, jpeg, webp or gif)',
   })
   avatar?: string | null;
 }

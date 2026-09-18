@@ -37,7 +37,7 @@ export class RequestOriginGuard implements CanActivate {
 
     // Origem presente porém não confiável → provável CSRF cross-site → bloqueia.
     if (!isTrustedOrigin(origin)) {
-      throw new ForbiddenException('Origem da requisição não permitida');
+      throw new ForbiddenException('Request origin not allowed');
     }
 
     return true;

@@ -89,7 +89,7 @@ export class FavoritesController {
     @UploadedFile() file?: Express.Multer.File,
   ) {
     if (!file?.buffer?.length) {
-      throw new BadRequestException('Arquivo de imagem ausente');
+      throw new BadRequestException('Image file is missing');
     }
     // Validação de imagem (400) e escopo/existência (404) tratados no service.
     return this.favorites.setPhoto(req.user.id, authorId, file.buffer);
@@ -117,7 +117,7 @@ export class FavoritePhotoController {
   @ApiOperation({ summary: 'Foto do avatar de um favorito (webp). Público.' })
   async serve(@Param('id') id: string, @Res() res: Response): Promise<void> {
     const photo = await this.favorites.getPhoto(id);
-    if (!photo) throw new NotFoundException('Foto não encontrada');
+    if (!photo) throw new NotFoundException('Photo not found');
     res.setHeader('Content-Type', photo.mime);
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.setHeader('Content-Length', String(photo.data.length));

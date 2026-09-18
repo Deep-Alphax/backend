@@ -40,7 +40,7 @@ export class MonitorsService {
     const guildId = dto.guildId?.trim() || null;
     if (!channelId && !guildId) {
       throw new BadRequestException(
-        'Informe channelId (canal) ou guildId (servidor)',
+        'Provide channelId (channel) or guildId (server)',
       );
     }
     const monitor = await this.prisma.getWriteClient().discordMonitor.create({
@@ -97,7 +97,7 @@ export class MonitorsService {
     const monitor = await this.prisma
       .getReadClient()
       .discordMonitor.findUnique({ where: { id } });
-    if (!monitor) throw new NotFoundException('Monitor não encontrado');
+    if (!monitor) throw new NotFoundException('Monitor not found');
     return monitor;
   }
 }

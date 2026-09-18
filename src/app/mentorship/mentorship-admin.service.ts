@@ -48,7 +48,7 @@ export class MentorshipAdminService {
         lessons: { orderBy: [{ position: 'asc' }, { createdAt: 'asc' }] },
       },
     });
-    if (!module) throw new NotFoundException('Trilha não encontrada.');
+    if (!module) throw new NotFoundException('Track not found.');
     return module;
   }
 
@@ -168,7 +168,7 @@ export class MentorshipAdminService {
       where: { id },
       select: { id: true },
     });
-    if (!found) throw new NotFoundException('Trilha não encontrada.');
+    if (!found) throw new NotFoundException('Track not found.');
   }
 
   private async assertLessonExists(id: string) {
@@ -176,7 +176,7 @@ export class MentorshipAdminService {
       where: { id },
       select: { id: true },
     });
-    if (!found) throw new NotFoundException('Aula não encontrada.');
+    if (!found) throw new NotFoundException('Lesson not found.');
   }
 
   /**
@@ -189,7 +189,7 @@ export class MentorshipAdminService {
       error.code === UNIQUE_VIOLATION;
     if (!isUnique) return error;
     return new ConflictException(
-      `Já existe uma trilha com o slug "${slug ?? ''}".`,
+      `A track with the slug "${slug ?? ''}" already exists.`,
     );
   }
 }

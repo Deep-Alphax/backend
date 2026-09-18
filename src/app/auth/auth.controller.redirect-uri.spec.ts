@@ -47,7 +47,7 @@ describe('validateGoogleCode — validação do redirectUri', () => {
     const ctrl = makeController(reached);
     await expect(
       ctrl.validateGoogleCode(req, { code: 'abc', redirectUri }, res),
-    ).rejects.toThrow('redirectUri não permitido');
+    ).rejects.toThrow('redirectUri not allowed');
     expect(reached).not.toHaveBeenCalled(); // nem chega no service
   });
 
@@ -57,7 +57,22 @@ describe('validateGoogleCode — validação do redirectUri', () => {
     await expect(
       ctrl.validateGoogleCode(req, { code: 'abc', redirectUri: CALLBACK }, res),
     ).rejects.toThrow('REACHED_SERVICE');
-    expect(reached).toHaveBeenCalledWith('abc', CALLBACK);
+    expect(reached).toHaveBeenCalledWith('abc', CALLBACK, undefined);
+  });
+
+  it('repassa o código de indicação ao service', async () => {
+    // Sem isto, quem chega pelo link de afiliado e entra com Google se
+    // cadastra sem padrinho — a comissão some sem ninguém perceber.
+    const reached = jest.fn().mockRejectedValue(new Error('REACHED_SERVICE'));
+    const ctrl = makeController(reached);
+    await expect(
+      ctrl.validateGoogleCode(
+        req,
+        { code: 'abc', redirectUri: CALLBACK, referralCode: 'deep-alpha' },
+        res,
+      ),
+    ).rejects.toThrow('REACHED_SERVICE');
+    expect(reached).toHaveBeenCalledWith('abc', CALLBACK, 'deep-alpha');
   });
 
   it('aceita com barra final (normalização)', async () => {

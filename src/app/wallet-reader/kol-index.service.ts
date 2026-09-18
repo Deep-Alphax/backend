@@ -333,7 +333,7 @@ export class KolIndexService implements OnModuleInit {
       db.kolPreset.findFirst({ where: { id: kolId, deletedAt: null } }),
       db.kolUserOverride.findUnique({ where: { userId_kolId: { userId, kolId } } }),
     ]);
-    if (!preset && !override) throw new NotFoundException('KOL não encontrado');
+    if (!preset && !override) throw new NotFoundException('KOL not found');
     return this.mergeState(kolId, preset, override);
   }
 
@@ -416,7 +416,7 @@ export class KolIndexService implements OnModuleInit {
     // Só aceita KOL que exista no preset ou que já seja custom DESTE usuário —
     // sem isso, qualquer id inventado viraria linha no banco.
     const known = await this.isKnownKol(userId, kolId);
-    if (!known) throw new NotFoundException('KOL não encontrado');
+    if (!known) throw new NotFoundException('KOL not found');
 
     const data = this.overrideData(dto);
 
@@ -562,7 +562,7 @@ export class KolIndexService implements OnModuleInit {
   /** Renomeia um squad da conta em todos os KOLs dela. */
   async renameSquad(userId: string, from: string, to: string): Promise<{ updated: number }> {
     const target = to.trim();
-    if (!target) throw new NotFoundException('Nome de squad inválido');
+    if (!target) throw new NotFoundException('Invalid squad name');
     const key = from.trim().toLowerCase();
     return this.rewriteOwnSquads(userId, (squads) => {
       if (!squads.some((s) => s.trim().toLowerCase() === key)) return squads;
@@ -686,7 +686,7 @@ export class KolIndexService implements OnModuleInit {
   /** Um KOL do preset, COM as carteiras — o editor do admin abre por aqui. */
   async getPreset(id: string): Promise<KolPresetView & { deletedAt: number | null }> {
     const row = await this.prisma.getReadClient().kolPreset.findUnique({ where: { id } });
-    if (!row) throw new NotFoundException('KOL não encontrado no preset');
+    if (!row) throw new NotFoundException('KOL not found in the preset');
     return {
       ...this.toPresetView(row),
       deletedAt: row.deletedAt ? row.deletedAt.getTime() : null,
@@ -730,7 +730,7 @@ export class KolIndexService implements OnModuleInit {
         .kolPreset.update({ where: { id }, data });
       return this.toPresetView(row);
     } catch {
-      throw new NotFoundException('KOL não encontrado no preset');
+      throw new NotFoundException('KOL not found in the preset');
     }
   }
 
@@ -739,7 +739,7 @@ export class KolIndexService implements OnModuleInit {
     const { count } = await this.prisma
       .getWriteClient()
       .kolPreset.updateMany({ where: { id, deletedAt: null }, data: { deletedAt: new Date() } });
-    if (!count) throw new NotFoundException('KOL não encontrado no preset');
+    if (!count) throw new NotFoundException('KOL not found in the preset');
     return { ok: true };
   }
 
@@ -747,7 +747,7 @@ export class KolIndexService implements OnModuleInit {
     const { count } = await this.prisma
       .getWriteClient()
       .kolPreset.updateMany({ where: { id }, data: { deletedAt: null } });
-    if (!count) throw new NotFoundException('KOL não encontrado no preset');
+    if (!count) throw new NotFoundException('KOL not found in the preset');
     return { ok: true };
   }
 

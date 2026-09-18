@@ -43,7 +43,7 @@ const MAX_DURATION_SEC = 43_200;
 export class CreateModuleDto {
   @IsString()
   @MaxLength(80)
-  @Matches(SLUG, { message: 'slug deve conter só minúsculas, dígitos e hífen' })
+  @Matches(SLUG, { message: 'slug must contain only lowercase letters, digits and hyphens' })
   slug: string;
 
   @IsString()

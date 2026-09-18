@@ -121,7 +121,7 @@ describe('WalletsService', () => {
       const { service, client } = makeService();
       client.walletCatalog.count.mockResolvedValue(50);
       await expect(service.catalogWallet(USER, catalogDto())).rejects.toThrow(
-        /Limite/,
+        /limit/i,
       );
       expect(client.wallet.upsert).not.toHaveBeenCalled();
     });

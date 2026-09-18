@@ -146,7 +146,7 @@ export class AnalyticsService {
       where: { userId_walletId: { userId, walletId } }, // acesso: só carteira catalogada
       select: { id: true },
     });
-    if (!entry) throw new NotFoundException('Carteira não encontrada');
+    if (!entry) throw new NotFoundException('Wallet not found');
 
     return this.computeCached(
       userId,
@@ -180,7 +180,7 @@ export class AnalyticsService {
         where: { userId_walletId: { userId, walletId } }, // acesso: só carteira catalogada
         select: { id: true },
       });
-      if (!entry) throw new NotFoundException('Carteira não encontrada');
+      if (!entry) throw new NotFoundException('Wallet not found');
       walletIds = [walletId];
       scope = MetricScope.WALLET;
       scopeWalletId = walletId;

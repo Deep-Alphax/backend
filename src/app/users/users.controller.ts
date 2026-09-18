@@ -38,7 +38,7 @@ export class UsersController {
   @ApiResponse({ status: 404, description: 'Usuário sem avatar armazenado' })
   async avatar(@Param('id') id: string, @Res() res: Response): Promise<void> {
     const avatar = await this.users.getAvatar(id);
-    if (!avatar) throw new NotFoundException('Avatar não encontrado');
+    if (!avatar) throw new NotFoundException('Avatar not found');
 
     res.setHeader('Content-Type', avatar.mime);
     res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -54,7 +54,7 @@ export class UsersController {
     status: 200,
     description: 'Usuário atualizado (id, email, role)',
   })
-  @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
+  @ApiResponse({ status: 404, description: 'User not found' })
   setRole(@Body() dto: SetRoleDto) {
     return this.users.setRoleByEmail(dto.email, dto.role);
   }

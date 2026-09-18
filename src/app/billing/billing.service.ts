@@ -5,6 +5,7 @@ import type Stripe from 'stripe';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StripeService } from './stripe.service';
 import { epochToDate, mapSubscriptionStatus } from './stripe-mapping';
+import { AffiliatesService } from '../affiliates/affiliates.service';
 
 /** Eventos que mexem no estado da assinatura. O resto é ignorado (com 200). */
 const HANDLED = new Set([
@@ -29,6 +30,7 @@ export class BillingService {
     private readonly prisma: PrismaService,
     private readonly stripeService: StripeService,
     private readonly configService: ConfigService,
+    private readonly affiliates: AffiliatesService,
   ) {}
 
   /**
@@ -42,7 +44,7 @@ export class BillingService {
     const priceId = this.stripeService.proPriceId;
     if (!priceId) {
       throw new BadRequestException(
-        'STRIPE_PRICE_PRO_MONTHLY não configurado.',
+        'STRIPE_PRICE_PRO_MONTHLY is not configured.',
       );
     }
 
@@ -50,7 +52,7 @@ export class BillingService {
       where: { id: userId },
       select: { id: true, email: true, subscription: true },
     });
-    if (!user) throw new BadRequestException('Usuário não encontrado.');
+    if (!user) throw new BadRequestException('User not found.');
 
     const appUrl =
       this.configService.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
@@ -76,7 +78,7 @@ export class BillingService {
     });
 
     if (!session.url) {
-      throw new BadRequestException('Stripe não devolveu URL de checkout.');
+      throw new BadRequestException('Stripe did not return a checkout URL.');
     }
     return { url: session.url };
   }
@@ -93,10 +95,10 @@ export class BillingService {
   constructEvent(rawBody: Buffer | undefined, signature: string): Stripe.Event {
     const secret = this.stripeService.webhookSecret;
     if (!secret) {
-      throw new BadRequestException('STRIPE_WEBHOOK_SECRET não configurado.');
+      throw new BadRequestException('STRIPE_WEBHOOK_SECRET is not configured.');
     }
     if (!rawBody) {
-      throw new BadRequestException('Corpo bruto ausente na requisição.');
+      throw new BadRequestException('Raw body missing from the request.');
     }
     try {
       return this.stripeService.stripe.webhooks.constructEvent(
@@ -110,7 +112,7 @@ export class BillingService {
       this.logger.warn(
         `Assinatura de webhook inválida: ${(err as Error).message}`,
       );
-      throw new BadRequestException('Assinatura inválida.');
+      throw new BadRequestException('Invalid signature.');
     }
   }
 
@@ -232,6 +234,19 @@ export class BillingService {
       )?.userId;
     if (!userId) return;
     await this.upsert(userId, subscription, asId(subscription.customer));
+
+    // Comissão do afiliado: só sobre o que FOI PAGO. `amount_paid` é zero numa
+    // fatura de valor zero (trial, cupom de 100%) e a apuração para sozinha.
+    // O `accrueForInvoice` nunca lança: comissão é acessório da cobrança e não
+    // pode derrubar o processamento do evento.
+    if (invoice.amount_paid > 0 && invoice.id) {
+      await this.affiliates.accrueForInvoice({
+        referredUserId: userId,
+        providerInvoiceId: invoice.id,
+        paidAmountCents: invoice.amount_paid,
+        currency: invoice.currency ?? 'usd',
+      });
+    }
   }
 
   /**

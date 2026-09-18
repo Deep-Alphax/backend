@@ -5,6 +5,7 @@ import { BillingService } from './billing.service';
 import { EntitlementsService } from './entitlements.service';
 import { StripeService } from './stripe.service';
 import { PlanGuard } from './guards/plan.guard';
+import { AffiliatesModule } from '../affiliates/affiliates.module';
 
 /**
  * Billing: assinatura, webhook e o gate de plano.
@@ -15,7 +16,7 @@ import { PlanGuard } from './guards/plan.guard';
  * naqueles dois, e o gate de acesso continua igual.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AffiliatesModule],
   controllers: [BillingController],
   providers: [StripeService, BillingService, EntitlementsService, PlanGuard],
   exports: [EntitlementsService, PlanGuard],

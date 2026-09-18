@@ -14,15 +14,15 @@ export class LocalStrategy extends PassportStrategy(Strategy) {
 
   async validate(email: string, password: string): Promise<any> {
     if (!email || typeof email !== 'string') {
-      throw new UnauthorizedException('E-mail é obrigatório');
+      throw new UnauthorizedException('Email is required');
     }
     if (!password || typeof password !== 'string') {
-      throw new UnauthorizedException('Senha é obrigatória');
+      throw new UnauthorizedException('Password is required');
     }
 
     const user = await this.authService.validateUser(email, password);
     if (!user) {
-      throw new UnauthorizedException('Credenciais inválidas');
+      throw new UnauthorizedException('Invalid credentials');
     }
     return user;
   }

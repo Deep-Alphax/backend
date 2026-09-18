@@ -92,7 +92,7 @@ export class AuthController {
   @ApiResponse({ status: 200, description: '{ available: boolean }' })
   async checkEmailAvailability(@Query('email') email: string) {
     if (!email || !email.includes('@')) {
-      throw new BadRequestException('Endereço de e-mail inválido');
+      throw new BadRequestException('Invalid email address');
     }
     const available = await this.authService.isEmailAvailable(email);
     return { available };
@@ -118,7 +118,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login com e-mail e senha' })
   @ApiResponse({ status: 200, description: 'Login efetuado (ou desafio MFA)' })
-  @ApiResponse({ status: 401, description: 'Credenciais inválidas' })
+  @ApiResponse({ status: 401, description: 'Invalid credentials' })
   async loginEmail(@Request() req, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.login(req.user, {
       userAgent: req.headers?.['user-agent'],
@@ -131,7 +131,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: '[Admin] Login — Turnstile + role-gated' })
   @ApiResponse({ status: 200, description: 'Login efetuado' })
-  @ApiResponse({ status: 401, description: 'Credenciais inválidas' })
+  @ApiResponse({ status: 401, description: 'Invalid credentials' })
   async loginAdmin(@Request() req, @Res({ passthrough: true }) res: Response) {
     // 401 (não 403): um 403 confirmaria que a senha está CERTA (só falta papel),
     // formando um oráculo para validar credenciais roubadas. Indistinguível.
@@ -167,7 +167,7 @@ export class AuthController {
     @Res() res: Response,
   ) {
     const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
-    const { redirectTo } = this.oauthState.verify(state);
+    const { redirectTo, referralCode } = this.oauthState.verify(state);
     const url = new URL('/auth/callback', frontendUrl);
 
     if (error) url.searchParams.set('error', error);
@@ -176,6 +176,9 @@ export class AuthController {
 
     const safe = sanitizeRelativePath(redirectTo);
     if (safe) url.searchParams.set('redirect_to', safe);
+    // Devolve o código de indicação ao front, que o reenvia no /google/validate.
+    // Já veio do state assinado, então passou pela nossa validação.
+    if (referralCode) url.searchParams.set('ref', referralCode);
 
     return res.redirect(url.toString());
   }
@@ -187,11 +190,11 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Code inválido ou expirado' })
   async validateGoogleCode(
     @Request() req,
-    @Body() body: { code: string; redirectUri: string },
+    @Body() body: { code: string; redirectUri: string; referralCode?: string },
     @Res({ passthrough: true }) res: Response,
   ) {
-    if (!body.code) throw new BadRequestException('Código de autorização do Google é obrigatório');
-    if (!body.redirectUri) throw new BadRequestException('URI de redirecionamento é obrigatória');
+    if (!body.code) throw new BadRequestException('The Google authorization code is required');
+    if (!body.redirectUri) throw new BadRequestException('The redirect URI is required');
 
     // O `redirectUri` NÃO é um destino de redirect do browser: é o `redirect_uri`
     // repassado ao token endpoint do Google, que exige valor IDÊNTICO ao usado no
@@ -201,10 +204,14 @@ export class AuthController {
     // open-redirect e corrige o falso "não permitido" em prod (a checagem antiga
     // usava as origens do FRONT, onde `api.deepalpha.fun` nunca aparece).
     if (normalizeUri(body.redirectUri) !== this.expectedGoogleRedirectUri()) {
-      throw new BadRequestException('redirectUri não permitido');
+      throw new BadRequestException('redirectUri not allowed');
     }
 
-    const result = await this.authService.validateGoogleCode(body.code, body.redirectUri);
+    const result = await this.authService.validateGoogleCode(
+      body.code,
+      body.redirectUri,
+      body.referralCode,
+    );
     return applyAuthCookiesFromResult(res, resolveAuthSurface(req), result);
   }
 
@@ -221,7 +228,7 @@ export class AuthController {
     const surface = resolveAuthSurface(req);
     const token =
       req.cookies?.[refreshCookieName(surface)] || body?.refresh_token || body?.refreshToken;
-    if (!token) throw new UnauthorizedException('Refresh token ausente');
+    if (!token) throw new UnauthorizedException('Refresh token is missing');
 
     const dto: RefreshTokenDto = { refreshToken: token };
     const result = await this.authService.refreshToken(dto);
@@ -256,7 +263,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Verifica o código e retorna o token de redefinição' })
   @ApiResponse({ status: 200, description: 'Código verificado, token retornado' })
-  @ApiResponse({ status: 400, description: 'Código inválido ou expirado' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired code' })
   async verifyResetCode(@Body() dto: VerifyResetCodeDto) {
     return this.authService.verifyResetCode(dto.email, dto.code);
   }
@@ -337,7 +344,7 @@ export class AuthController {
     await this.authService.send2FACode(req.user.id, req.user.email, {
       userAgent: req.headers?.['user-agent'],
     });
-    return { message: 'Código enviado para o seu e-mail.', success: true };
+    return { message: 'Code sent to your email.', success: true };
   }
 
   @Post('2fa/enable')
@@ -350,7 +357,7 @@ export class AuthController {
   @ApiResponse({ status: 200, description: '2FA ativado' })
   async enable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
     await this.authService.enable2FA(req.user.id, dto.code);
-    return { message: '2FA ativado com sucesso.', success: true };
+    return { message: 'Two-factor authentication enabled.', success: true };
   }
 
   @Post('2fa/disable')
@@ -363,7 +370,7 @@ export class AuthController {
   @ApiResponse({ status: 200, description: '2FA desativado' })
   async disable2FA(@Request() req, @Body() dto: TwoFactorCodeDto) {
     await this.authService.disable2FA(req.user.id, dto.code);
-    return { message: '2FA desativado com sucesso.', success: true };
+    return { message: 'Two-factor authentication disabled.', success: true };
   }
 
   @Post('2fa/verify-login')
@@ -401,7 +408,7 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'Código enviado' })
   async sendAccountDeletionCode(@Request() req) {
     await this.authService.send2FACode(req.user.id, req.user.email, { purpose: 'delete' });
-    return { message: 'Código enviado para o seu e-mail.', success: true };
+    return { message: 'Code sent to your email.', success: true };
   }
 
   @Post('account/delete')
@@ -419,6 +426,6 @@ export class AuthController {
   ) {
     await this.authService.deleteOwnAccount(req.user.id, dto.code, dto.reason);
     clearAuthCookies(res, resolveAuthSurface(req));
-    return { message: 'Conta excluída com sucesso.', success: true };
+    return { message: 'Account deleted.', success: true };
   }
 }

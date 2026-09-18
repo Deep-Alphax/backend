@@ -112,7 +112,7 @@ export class SourcesService {
     const count = await write.source.count({ where: { userId } });
     if (count >= SourcesService.MAX_SOURCES_PER_USER) {
       throw new BadRequestException(
-        `Limite de ${SourcesService.MAX_SOURCES_PER_USER} fontes por conta atingido.`,
+        `You reached the limit of ${SourcesService.MAX_SOURCES_PER_USER} sources per account.`,
       );
     }
 
@@ -133,7 +133,7 @@ export class SourcesService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Você já tem uma fonte com esse nome.');
+        throw new ConflictException('You already have a source with that name.');
       }
       throw error;
     }
@@ -153,7 +153,7 @@ export class SourcesService {
       where: { id, userId }, // ownership
       select: SOURCE_SELECT,
     });
-    if (!source) throw new NotFoundException('Fonte não encontrada');
+    if (!source) throw new NotFoundException('Source not found');
     return mapSource(source);
   }
 
@@ -179,7 +179,7 @@ export class SourcesService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Você já tem uma fonte com esse nome.');
+        throw new ConflictException('You already have a source with that name.');
       }
       throw error;
     }
@@ -266,7 +266,7 @@ export class SourcesService {
         error.code === 'P2002'
       ) {
         throw new ConflictException(
-          'Esta carteira já está no seu catálogo (como carteira ou fonte).',
+          'This wallet is already in your list (as a wallet or as a source).',
         );
       }
       throw error;
@@ -280,7 +280,7 @@ export class SourcesService {
       where: { userId, walletId, sourceId, role: CatalogRole.SOURCE },
       select: { id: true },
     });
-    if (!entry) throw new NotFoundException('Carteira da fonte não encontrada');
+    if (!entry) throw new NotFoundException('Source wallet not found');
 
     // Remove só o vínculo (catálogo); a carteira/trades são compartilhados e ficam.
     await write.walletCatalog.delete({
@@ -295,7 +295,7 @@ export class SourcesService {
       });
     }
     await this.reattributeUser(userId);
-    return { success: true, message: 'Carteira da fonte removida.' };
+    return { success: true, message: 'Source wallet removed.' };
   }
 
   // ─────────────────────────── Atribuição (lead-lag) ───────────────────────────
@@ -742,6 +742,6 @@ export class SourcesService {
       where: { id, userId },
       select: { id: true },
     });
-    if (!owned) throw new NotFoundException('Fonte não encontrada');
+    if (!owned) throw new NotFoundException('Source not found');
   }
 }

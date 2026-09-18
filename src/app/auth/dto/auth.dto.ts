@@ -26,7 +26,7 @@ export enum Language {
  */
 export const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
 const PASSWORD_MESSAGE =
-  'A senha deve ter no mínimo 8 caracteres, com ao menos uma maiúscula, uma minúscula e um número';
+  'Password must be at least 8 characters, with an uppercase letter, a lowercase letter and a number';
 
 export class EmailLoginDto {
   @ApiProperty({ description: 'E-mail da conta', example: 'user@example.com' })
@@ -81,6 +81,17 @@ export class EmailRegisterDto {
   @IsOptional()
   @IsString()
   turnstileToken?: string;
+
+  /**
+   * Código de indicação vindo do link de afiliado. Código inexistente NÃO
+   * derruba o cadastro — a venda apenas não é atribuída (ver
+   * AffiliatesService.resolveReferrer).
+   */
+  @ApiPropertyOptional({ description: 'Código de indicação (link de afiliado).' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  referralCode?: string;
 }
 
 export class RefreshTokenDto {
@@ -107,7 +118,7 @@ export class VerifyResetCodeDto {
   @IsString()
   @IsNotEmpty()
   @Length(6, 6)
-  @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos' })
+  @Matches(/^\d{6}$/, { message: 'The code must be exactly 6 digits' })
   code: string;
 }
 
@@ -162,7 +173,7 @@ export class VerifyEmailChangeDto {
   @IsString()
   @IsNotEmpty()
   @Length(6, 6)
-  @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos' })
+  @Matches(/^\d{6}$/, { message: 'The code must be exactly 6 digits' })
   code: string;
 }
 
@@ -171,7 +182,7 @@ export class TwoFactorCodeDto {
   @IsString()
   @IsNotEmpty()
   @Length(6, 6)
-  @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos' })
+  @Matches(/^\d{6}$/, { message: 'The code must be exactly 6 digits' })
   code: string;
 }
 
@@ -185,7 +196,7 @@ export class VerifyLoginMfaDto {
   @IsString()
   @IsNotEmpty()
   @Length(6, 6)
-  @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos' })
+  @Matches(/^\d{6}$/, { message: 'The code must be exactly 6 digits' })
   code: string;
 }
 
@@ -194,12 +205,12 @@ export class DeleteAccountDto {
   @IsString()
   @IsNotEmpty()
   @Length(6, 6)
-  @Matches(/^\d{6}$/, { message: 'O código deve conter exatamente 6 dígitos' })
+  @Matches(/^\d{6}$/, { message: 'The code must be exactly 6 digits' })
   code: string;
 
   @ApiProperty({ description: 'Motivo da exclusão (LGPD)', example: 'Não uso mais a plataforma' })
   @IsString()
-  @IsNotEmpty({ message: 'Informe o motivo da exclusão.' })
+  @IsNotEmpty({ message: 'Tell us why you are deleting the account.' })
   @MaxLength(500)
   reason: string;
 }

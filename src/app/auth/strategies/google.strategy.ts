@@ -59,7 +59,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     // e-mail não verificado permitia account takeover (atacante cria conta
     // Google com o e-mail da vítima sem confirmar a posse dele).
     if (emails?.[0]?.verified === false || emails?.[0]?.verified === 'false') {
-      done(new UnauthorizedException('E-mail da conta Google não verificado'), false);
+      done(new UnauthorizedException('The Google account email is not verified'), false);
       return;
     }
 

@@ -35,7 +35,7 @@ export class UsersService {
       where: { email: { equals: email.trim(), mode: 'insensitive' } },
       select: { id: true },
     });
-    if (!user) throw new NotFoundException('Usuário não encontrado');
+    if (!user) throw new NotFoundException('User not found');
     return this.prisma.getWriteClient().user.update({
       where: { id: user.id },
       data: { role },

@@ -70,7 +70,7 @@ export class AnalyticsController {
     description: 'Offset do fuso em minutos (ex.: -180 = BRT)',
   })
   @ApiResponse({ status: 200, description: 'Resultado das métricas' })
-  @ApiResponse({ status: 404, description: 'Carteira não encontrada' })
+  @ApiResponse({ status: 404, description: 'Wallet not found' })
   walletAnalytics(
     @Request() req,
     @Param('id') id: string,
@@ -111,7 +111,7 @@ export class AnalyticsController {
   })
   @ApiResponse({
     status: 404,
-    description: 'Carteira não encontrada (walletId inválido)',
+    description: 'Wallet not found (walletId inválido)',
   })
   portfolioAnalytics(@Request() req, @Query() q: MetricsQueryDto) {
     return this.analytics.portfolioMetrics(

@@ -72,25 +72,25 @@ export class EmailService {
 
   async sendWelcomeUser(data: { email: string; firstName: string }): Promise<void> {
     const html = this.wrap(
-      'Bem-vindo!',
-      `<p>Olá <strong>${this.esc(data.firstName || 'trader')}</strong>,</p>
-       <p>Sua conta na ${this.esc(this.brand)} está pronta. Conecte suas carteiras (multi-chain)
-       e acompanhe seu PnL, tempo de hold, taxas e desempenho por período — tudo num só lugar.</p>`,
+      'Welcome!',
+      `<p>Hi <strong>${this.esc(data.firstName || 'trader')}</strong>,</p>
+       <p>Your ${this.esc(this.brand)} account is ready. Connect your wallets (multi-chain)
+       and follow your PnL, hold time, fees and performance over time — all in one place.</p>`,
     );
-    const text = `Olá ${data.firstName || 'trader'},\n\nSua conta na ${this.brand} está pronta.\n\n${this.brand} — ${this.domain}`;
-    await this.send({ from: this.from, to: data.email, subject: `Bem-vindo à ${this.brand}`, html, text });
+    const text = `Hi ${data.firstName || 'trader'},\n\nYour ${this.brand} account is ready.\n\n${this.brand} — ${this.domain}`;
+    await this.send({ from: this.from, to: data.email, subject: `Welcome to ${this.brand}`, html, text });
   }
 
   async sendPasswordResetCode(data: { email: string; firstName: string; code: string }): Promise<void> {
     const html = this.wrap(
-      'Redefinição de senha',
-      `<p>Olá <strong>${this.esc(data.firstName || 'usuário')}</strong>,</p>
-       <p>Use o código abaixo para redefinir sua senha. Ele expira em 15 minutos.</p>
+      'Reset your password',
+      `<p>Hi <strong>${this.esc(data.firstName || 'there')}</strong>,</p>
+       <p>Use the code below to reset your password. It expires in 15 minutes.</p>
        ${this.codeCard(data.code)}
-       <p style="color:#888;font-size:13px;">Se você não solicitou, ignore este e-mail.</p>`,
+       <p style="color:#888;font-size:13px;">If you did not request this, ignore this email.</p>`,
     );
-    const text = `Olá ${data.firstName || 'usuário'},\n\nSeu código de recuperação: ${data.code}\n(Expira em 15 min. Se não foi você, ignore.)\n\n${this.brand} — ${this.domain}`;
-    await this.send({ from: this.from, to: data.email, subject: 'Redefina sua senha', html, text });
+    const text = `Hi ${data.firstName || 'there'},\n\nYour recovery code: ${data.code}\n(Expires in 15 min. If this was not you, ignore it.)\n\n${this.brand} — ${this.domain}`;
+    await this.send({ from: this.from, to: data.email, subject: 'Reset your password', html, text });
   }
 
   async sendEmailChangeVerification(data: {
@@ -103,16 +103,16 @@ export class EmailService {
     device: string;
   }): Promise<void> {
     const html = this.wrap(
-      'Confirmação de troca de e-mail',
-      `<p>Olá <strong>${this.esc(data.firstName)}</strong>,</p>
-       <p>Recebemos um pedido para alterar o e-mail da sua conta para <strong>${this.esc(data.newEmail)}</strong>.
-       Confirme com o código abaixo (expira em 15 minutos):</p>
+      'Confirm your new email',
+      `<p>Hi <strong>${this.esc(data.firstName)}</strong>,</p>
+       <p>We received a request to change your account email to <strong>${this.esc(data.newEmail)}</strong>.
+       Confirm it with the code below (expires in 15 minutes):</p>
        ${this.codeCard(data.code)}
-       ${this.infoRows([['Solicitado em', data.requestDate], ['Local', data.location], ['Dispositivo', data.device]])}
-       <p style="color:#888;font-size:13px;">Se não foi você, altere sua senha imediatamente.</p>`,
+       ${this.infoRows([['Requested at', data.requestDate], ['Location', data.location], ['Device', data.device]])}
+       <p style="color:#888;font-size:13px;">If this was not you, change your password right away.</p>`,
     );
-    const text = `Olá ${data.firstName},\n\nCódigo para troca de e-mail (para ${data.newEmail}): ${data.code}\nSolicitado em: ${data.requestDate} — ${data.location} — ${data.device}\n\n${this.brand} — ${this.domain}`;
-    await this.send({ from: this.from, to: data.email, subject: `Confirme a troca de e-mail — ${this.brand}`, html, text });
+    const text = `Hi ${data.firstName},\n\nEmail change code (to ${data.newEmail}): ${data.code}\nRequested at: ${data.requestDate} — ${data.location} — ${data.device}\n\n${this.brand} — ${this.domain}`;
+    await this.send({ from: this.from, to: data.email, subject: `Confirm your new email — ${this.brand}`, html, text });
   }
 
   async sendPasswordChangedNotification(data: {
@@ -123,14 +123,14 @@ export class EmailService {
     device: string;
   }): Promise<void> {
     const html = this.wrap(
-      'Sua senha foi alterada',
-      `<p>Olá <strong>${this.esc(data.firstName)}</strong>,</p>
-       <p>A senha da sua conta ${this.esc(this.brand)} foi alterada.</p>
-       ${this.infoRows([['Quando', data.changedAt], ['Local', data.location], ['Dispositivo', data.device]])}
-       <p style="color:#888;font-size:13px;">Se não foi você, redefina sua senha e contate o suporte.</p>`,
+      'Your password was changed',
+      `<p>Hi <strong>${this.esc(data.firstName)}</strong>,</p>
+       <p>The password for your ${this.esc(this.brand)} account was changed.</p>
+       ${this.infoRows([['When', data.changedAt], ['Location', data.location], ['Device', data.device]])}
+       <p style="color:#888;font-size:13px;">If this was not you, reset your password and contact support.</p>`,
     );
-    const text = `Olá ${data.firstName},\n\nSua senha foi alterada em ${data.changedAt} (${data.location}, ${data.device}).\nSe não foi você, contate o suporte.\n\n${this.brand} — ${this.domain}`;
-    await this.send({ from: this.from, to: data.email, subject: `Sua senha foi alterada — ${this.brand}`, html, text });
+    const text = `Hi ${data.firstName},\n\nYour password was changed on ${data.changedAt} (${data.location}, ${data.device}).\nIf this was not you, contact support.\n\n${this.brand} — ${this.domain}`;
+    await this.send({ from: this.from, to: data.email, subject: `Your password was changed — ${this.brand}`, html, text });
   }
 
   async sendEmailChangedNotification(data: {
@@ -142,16 +142,16 @@ export class EmailService {
     device: string;
   }): Promise<void> {
     const html = this.wrap(
-      'Seu e-mail foi alterado',
-      `<p>Olá <strong>${this.esc(data.firstName)}</strong>,</p>
-       <p>O e-mail da sua conta foi alterado de <strong>${this.esc(data.oldEmail)}</strong> para
+      'Your email was changed',
+      `<p>Hi <strong>${this.esc(data.firstName)}</strong>,</p>
+       <p>Your account email was changed from <strong>${this.esc(data.oldEmail)}</strong> to
        <strong>${this.esc(data.newEmail)}</strong>.</p>
-       ${this.infoRows([['Quando', data.changedAt], ['Local', data.location], ['Dispositivo', data.device]])}
-       <p style="color:#888;font-size:13px;">Se não foi você, contate o suporte imediatamente.</p>`,
+       ${this.infoRows([['When', data.changedAt], ['Location', data.location], ['Device', data.device]])}
+       <p style="color:#888;font-size:13px;">If this was not you, contact support immediately.</p>`,
     );
-    const text = `Olá ${data.firstName},\n\nSeu e-mail foi alterado de ${data.oldEmail} para ${data.newEmail} em ${data.changedAt}.\n\n${this.brand} — ${this.domain}`;
+    const text = `Hi ${data.firstName},\n\nYour email was changed from ${data.oldEmail} to ${data.newEmail} on ${data.changedAt}.\n\n${this.brand} — ${this.domain}`;
     // Notifica o e-mail ANTIGO (canal ainda sob controle do titular).
-    await this.send({ from: this.from, to: data.oldEmail, subject: `Seu e-mail foi alterado — ${this.brand}`, html, text });
+    await this.send({ from: this.from, to: data.oldEmail, subject: `Your email was changed — ${this.brand}`, html, text });
   }
 
   async send2FACode(
@@ -160,29 +160,29 @@ export class EmailService {
     meta?: { loginDate?: string; loginDevice?: string },
   ): Promise<void> {
     const rows: [string, string][] = [];
-    if (meta?.loginDate) rows.push(['Quando', meta.loginDate]);
-    if (meta?.loginDevice) rows.push(['Dispositivo', meta.loginDevice]);
+    if (meta?.loginDate) rows.push(['When', meta.loginDate]);
+    if (meta?.loginDevice) rows.push(['Device', meta.loginDevice]);
     const html = this.wrap(
-      'Seu código de acesso',
-      `<p>Use o código abaixo para concluir seu login. Ele expira em 10 minutos.</p>
+      'Your sign-in code',
+      `<p>Use the code below to finish signing in. It expires in 10 minutes.</p>
        ${this.codeCard(code)}
        ${rows.length ? this.infoRows(rows) : ''}
-       <p style="color:#888;font-size:13px;">Se não foi você tentando entrar, altere sua senha.</p>`,
+       <p style="color:#888;font-size:13px;">If this was not you signing in, change your password.</p>`,
     );
-    const text = `Seu código de acesso: ${code}\n(Expira em 10 min.)\n\n${this.brand} — ${this.domain}`;
-    await this.send({ from: this.from, to: email, subject: `${code} é o seu código ${this.brand}`, html, text });
+    const text = `Your sign-in code: ${code}\n(Expires in 10 min.)\n\n${this.brand} — ${this.domain}`;
+    await this.send({ from: this.from, to: email, subject: `${code} is your ${this.brand} code`, html, text });
   }
 
   async sendAccountDeletionCode(email: string, code: string): Promise<void> {
     const html = this.wrap(
-      'Confirmação de exclusão de conta',
-      `<p>Você solicitou a <strong>exclusão da sua conta</strong> ${this.esc(this.brand)}.
-       Use o código abaixo para confirmar (expira em 10 minutos):</p>
+      'Confirm account deletion',
+      `<p>You asked to <strong>delete your ${this.esc(this.brand)} account</strong>.
+       Use the code below to confirm (expires in 10 minutes):</p>
        ${this.codeCard(code)}
-       <p style="color:#b00;font-size:13px;">Esta ação é irreversível. Se não foi você, ignore este e-mail e altere sua senha.</p>`,
+       <p style="color:#b00;font-size:13px;">This cannot be undone. If this was not you, ignore this email and change your password.</p>`,
     );
-    const text = `Código para EXCLUIR sua conta: ${code}\n(Expira em 10 min. Ação irreversível.)\n\n${this.brand} — ${this.domain}`;
-    await this.send({ from: this.from, to: email, subject: `Confirme a exclusão da sua conta ${this.brand}`, html, text });
+    const text = `Code to DELETE your account: ${code}\n(Expires in 10 min. This cannot be undone.)\n\n${this.brand} — ${this.domain}`;
+    await this.send({ from: this.from, to: email, subject: `Confirm deleting your ${this.brand} account`, html, text });
   }
 
   /** Aviso interno de exclusão de conta (LGPD) ao e-mail de privacidade. */
@@ -207,19 +207,19 @@ export class EmailService {
     };
     const name = `${a.firstName ?? ''} ${a.lastName ?? ''}`.trim() || '—';
     const html = this.wrap(
-      'Conta excluída (LGPD)',
-      `<p>Um usuário excluiu a própria conta.</p>
+      'Account deleted (LGPD)',
+      `<p>A user deleted their own account.</p>
        ${this.infoRows([
          ['ID', a.id],
-         ['Nome', name],
-         ['E-mail', a.email],
-         ['Motivo', data.reason],
-         ['Criada em', iso(a.createdAt)],
-         ['Excluída em', iso(a.deletedAt)],
+         ['Name', name],
+         ['Email', a.email],
+         ['Reason', data.reason],
+         ['Created at', iso(a.createdAt)],
+         ['Deleted at', iso(a.deletedAt)],
        ])}`,
     );
-    const text = `Conta excluída (LGPD)\nID: ${a.id}\nNome: ${name}\nE-mail: ${a.email}\nMotivo: ${data.reason}\nExcluída em: ${iso(a.deletedAt)}`;
-    await this.send({ from: this.from, to: this.privacyEmail, subject: `[LGPD] Conta excluída — ${a.id}`, html, text });
+    const text = `Account deleted (LGPD)\nID: ${a.id}\nName: ${name}\nEmail: ${a.email}\nReason: ${data.reason}\nDeleted at: ${iso(a.deletedAt)}`;
+    await this.send({ from: this.from, to: this.privacyEmail, subject: `[LGPD] Account deleted — ${a.id}`, html, text });
   }
 
   // ─────────────────────────── helpers de HTML ───────────────────────────
@@ -243,7 +243,7 @@ export class EmailService {
         ${bodyHtml}
       </td></tr>
       <tr><td style="padding:16px 28px;border-top:1px solid #2a2e37;">
-        <p style="margin:0;color:#6b7280;font-size:12px;">${this.esc(this.brand)} — este é um e-mail automático, não responda. ${this.esc(this.domain)}</p>
+        <p style="margin:0;color:#6b7280;font-size:12px;">${this.esc(this.brand)} — this is an automated email, please do not reply. ${this.esc(this.domain)}</p>
       </td></tr>
     </table>
   </td></tr></table>

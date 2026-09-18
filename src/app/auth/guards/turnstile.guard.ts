@@ -26,7 +26,7 @@ export class TurnstileGuard implements CanActivate {
     const token: string | undefined = request.body?.turnstileToken;
 
     if (!token) {
-      throw new BadRequestException('Verificação de segurança inválida.');
+      throw new BadRequestException('Security check failed.');
     }
 
     const remoteip: string =
@@ -43,7 +43,7 @@ export class TurnstileGuard implements CanActivate {
 
       if (!data.success) {
         this.logger.warn(`Turnstile failed: ${JSON.stringify(data['error-codes'])} ip=${remoteip}`);
-        throw new BadRequestException('Verificação de segurança inválida.');
+        throw new BadRequestException('Security check failed.');
       }
 
       return true;
@@ -52,7 +52,7 @@ export class TurnstileGuard implements CanActivate {
       // Network/API failure — fail closed in production
       this.logger.error(`Turnstile API error: ${err.message}`);
       if (process.env.NODE_ENV === 'production') {
-        throw new BadRequestException('Verificação de segurança inválida.');
+        throw new BadRequestException('Security check failed.');
       }
       return true;
     }

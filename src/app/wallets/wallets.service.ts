@@ -106,7 +106,7 @@ export class WalletsService {
       const count = await write.walletCatalog.count({ where: { userId } });
       if (count >= WalletsService.MAX_WALLETS_PER_USER) {
         throw new BadRequestException(
-          `Limite de ${WalletsService.MAX_WALLETS_PER_USER} carteiras por conta atingido.`,
+          `You reached the limit of ${WalletsService.MAX_WALLETS_PER_USER} wallets per account.`,
         );
       }
     }
@@ -167,7 +167,7 @@ export class WalletsService {
       where: { userId_walletId: { userId, walletId } },
       select: CATALOG_SELECT,
     });
-    if (!entry) throw new NotFoundException('Carteira não encontrada');
+    if (!entry) throw new NotFoundException('Wallet not found');
     return this.toPublic(entry);
   }
 
@@ -203,7 +203,7 @@ export class WalletsService {
         data: { isActive: false },
       });
     }
-    return { success: true, message: 'Carteira removida do seu catálogo.' };
+    return { success: true, message: 'Wallet removed from your list.' };
   }
 
   /**
@@ -234,6 +234,6 @@ export class WalletsService {
       where: { userId_walletId: { userId, walletId } },
       select: { id: true },
     });
-    if (!entry) throw new NotFoundException('Carteira não encontrada');
+    if (!entry) throw new NotFoundException('Wallet not found');
   }
 }

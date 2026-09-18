@@ -11,6 +11,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AffiliatesService } from '../affiliates/affiliates.service';
 import { UsersService } from '../users/users.service';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
@@ -58,6 +59,7 @@ export class AuthService {
     private readonly httpService: HttpService,
     private readonly emailService: EmailService,
     private readonly usersService: UsersService,
+    private readonly affiliates: AffiliatesService,
   ) {}
 
   // ─────────────────────────── Credenciais ───────────────────────────
@@ -140,10 +142,10 @@ export class AuthService {
   // ─────────────────────────── Cadastro ───────────────────────────
 
   async register(dto: EmailRegisterDto) {
-    const { email, password, complete_name, acceptedTerms, acceptedPrivacyPolicy, language } = dto;
+    const { email, password, complete_name, acceptedTerms, acceptedPrivacyPolicy, language, referralCode } = dto;
 
     if (!acceptedTerms || !acceptedPrivacyPolicy) {
-      throw new BadRequestException('É necessário aceitar os termos e a política de privacidade');
+      throw new BadRequestException('You must accept the terms of use and the privacy policy');
     }
 
     const normalizedEmail = email.toLowerCase().trim();
@@ -154,13 +156,17 @@ export class AuthService {
         select: { id: true },
       });
       if (existing) {
-        throw new ConflictException('Já existe uma conta com este e-mail');
+        throw new ConflictException('An account with this email already exists');
       }
 
       const hashedPassword = await bcrypt.hash(password, 12);
       const parts = complete_name.trim().split(/\s+/);
       const firstName = parts[0] || '';
       const lastName = parts.slice(1).join(' ');
+
+      // Link de afiliado: código inválido/inexistente vira null em silêncio —
+      // um cadastro não pode falhar porque alguém digitou o link errado.
+      const referredById = await this.affiliates.resolveReferrer(referralCode);
 
       const user = await this.prisma.getWriteClient().user.create({
         data: {
@@ -171,6 +177,7 @@ export class AuthService {
           language: language || 'EN',
           acceptedTerms,
           acceptedPrivacyPolicy,
+          referredById,
         },
         select: {
           id: true,
@@ -194,10 +201,10 @@ export class AuthService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Já existe uma conta com este e-mail');
+        throw new ConflictException('An account with this email already exists');
       }
       this.logger.error('Erro no cadastro:', error);
-      throw new BadRequestException('Falha ao criar a conta');
+      throw new BadRequestException('Could not create the account');
     }
   }
 
@@ -221,7 +228,7 @@ export class AuthService {
   /** Emite access + refresh, atualiza lastLoginAt e monta o payload de resposta. */
   private async issueSession(userId: string, user: any) {
     const jwtSecret = this.configService.get<string>('JWT_SECRET');
-    if (!jwtSecret) throw new UnauthorizedException('JWT secret não configurado');
+    if (!jwtSecret) throw new UnauthorizedException('JWT secret is not configured');
 
     const accessToken = this.jwtService.sign({ email: user.email, sub: userId });
     const refreshToken = await this.createRefreshToken(userId);
@@ -255,10 +262,10 @@ export class AuthService {
     try {
       payload = this.jwtService.verify(mfaToken);
     } catch {
-      throw new UnauthorizedException('Token MFA inválido ou expirado.');
+      throw new UnauthorizedException('Invalid or expired two-factor token.');
     }
     if (!payload?.mfaPending || !payload?.sub) {
-      throw new UnauthorizedException('Token MFA inválido.');
+      throw new UnauthorizedException('Invalid two-factor token.');
     }
 
     await this.verifyAndConsume2FACode(payload.sub, code);
@@ -267,7 +274,7 @@ export class AuthService {
       where: { id: payload.sub },
       select: { id: true, email: true, firstName: true, lastName: true, avatarUrl: true, role: true },
     });
-    if (!user) throw new UnauthorizedException('Usuário não encontrado.');
+    if (!user) throw new UnauthorizedException('User not found.');
 
     this.logger.log(`Login com MFA concluído — usuário ${user.id}`);
     return this.issueSession(user.id, user);
@@ -278,19 +285,19 @@ export class AuthService {
     try {
       payload = this.jwtService.verify(mfaToken);
     } catch {
-      throw new UnauthorizedException('Token MFA inválido ou expirado.');
+      throw new UnauthorizedException('Invalid or expired two-factor token.');
     }
     if (!payload?.mfaPending || !payload?.sub) {
-      throw new UnauthorizedException('Token MFA inválido.');
+      throw new UnauthorizedException('Invalid two-factor token.');
     }
     const user = await this.prisma.getReadClient().user.findUnique({
       where: { id: payload.sub },
       select: { email: true },
     });
-    if (!user) throw new UnauthorizedException('Usuário não encontrado.');
+    if (!user) throw new UnauthorizedException('User not found.');
 
     await this.send2FACode(payload.sub, user.email, opts);
-    return { message: 'Código reenviado para o seu e-mail.', success: true };
+    return { message: 'Code sent to your email again.', success: true };
   }
 
   async refreshToken(dto: RefreshTokenDto) {
@@ -299,7 +306,7 @@ export class AuthService {
 
       const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
       const blocked = await this.cacheManager.get('logout_rt:' + hash);
-      if (blocked) throw new UnauthorizedException('Token inválido');
+      if (blocked) throw new UnauthorizedException('Invalid token');
 
       const decoded = this.jwtService.verify(refreshToken, {
         secret: this.resolveRefreshSecret(),
@@ -310,7 +317,7 @@ export class AuthService {
         select: { id: true, email: true, isActive: true, deletedAt: true },
       });
       if (!user || !user.isActive || user.deletedAt) {
-        throw new UnauthorizedException('Usuário não encontrado ou inativo');
+        throw new UnauthorizedException('User not found or inactive');
       }
 
       const accessToken = this.jwtService.sign({ email: user.email, sub: user.id });
@@ -321,7 +328,7 @@ export class AuthService {
         data: { access_token: accessToken, refresh_token: newRefreshToken },
       };
     } catch {
-      throw new UnauthorizedException('Token de atualização inválido');
+      throw new UnauthorizedException('Invalid refresh token');
     }
   }
 
@@ -346,7 +353,7 @@ export class AuthService {
   async forgotPassword(email: string) {
     const generic = {
       success: true,
-      message: 'Se existir uma conta com este e-mail, enviaremos um código para redefinir a senha.',
+      message: 'If an account exists for this email, we will send a code to reset the password.',
     };
     const normalizedEmail = email.toLowerCase().trim();
 
@@ -376,15 +383,15 @@ export class AuthService {
     const cacheKey = `reset_code:${normalizedEmail}`;
     const cached = await this.cacheManager.get<any>(cacheKey);
 
-    if (!cached) throw new BadRequestException('Código inválido ou expirado');
-    if (cached.used) throw new BadRequestException('Código já foi utilizado');
-    if (new Date(cached.expiresAt) < new Date()) throw new BadRequestException('Código expirado');
-    if (cached.attempts >= 5) throw new BadRequestException('Muitas tentativas. Solicite um novo código');
+    if (!cached) throw new BadRequestException('Invalid or expired code');
+    if (cached.used) throw new BadRequestException('This code was already used');
+    if (new Date(cached.expiresAt) < new Date()) throw new BadRequestException('Code expired');
+    if (cached.attempts >= 5) throw new BadRequestException('Too many attempts. Request a new code');
 
     if (cached.code !== code) {
       cached.attempts += 1;
       await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
-      throw new BadRequestException('Código inválido');
+      throw new BadRequestException('Invalid code');
     }
 
     // Correto: marca used + attempts num único set (evita TOCTOU).
@@ -396,13 +403,13 @@ export class AuthService {
       { email: normalizedEmail, userId: cached.userId, type: 'password_reset' },
       { expiresIn: '30m' },
     );
-    return { success: true, token: resetToken, message: 'Código verificado com sucesso' };
+    return { success: true, token: resetToken, message: 'Code verified' };
   }
 
   async resendResetCode(email: string) {
     const generic = {
       success: true,
-      message: 'Se o e-mail estiver cadastrado, você receberá um novo código em instantes.',
+      message: 'If the email is registered, you will receive a new code shortly.',
     };
     const normalizedEmail = email.toLowerCase().trim();
     const user = await this.prisma.getReadClient().user.findUnique({
@@ -430,22 +437,22 @@ export class AuthService {
     try {
       decoded = this.jwtService.verify(token.trim());
     } catch {
-      throw new BadRequestException('Token inválido ou expirado');
+      throw new BadRequestException('Invalid or expired token');
     }
     if (decoded.type !== 'password_reset' || !decoded.email || !decoded.userId) {
-      throw new BadRequestException('Token inválido');
+      throw new BadRequestException('Invalid token');
     }
 
     const user = await this.prisma.getReadClient().user.findUnique({
       where: { email: decoded.email },
       select: { id: true, email: true, firstName: true, password: true, isActive: true, deletedAt: true },
     });
-    if (!user || user.id !== decoded.userId) throw new BadRequestException('Usuário não encontrado');
-    if (user.deletedAt) throw new BadRequestException('Esta conta foi excluída e não pode ser recuperada.');
+    if (!user || user.id !== decoded.userId) throw new BadRequestException('User not found');
+    if (user.deletedAt) throw new BadRequestException('This account was deleted and cannot be recovered.');
 
     if (user.password) {
       const same = await bcrypt.compare(password, user.password);
-      if (same) throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+      if (same) throw new BadRequestException('The new password must be different from the current one');
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
@@ -460,7 +467,7 @@ export class AuthService {
     await this.cacheManager.del(`reset_code:${user.email}`);
 
     this.notifyPasswordChanged(user.email, user.firstName, userAgent, ip);
-    return { success: true, message: 'Senha redefinida com sucesso' };
+    return { success: true, message: 'Password reset' };
   }
 
   private async issuePasswordResetCode(user: { id: string; email: string; firstName: string }) {
@@ -493,17 +500,17 @@ export class AuthService {
       where: { id: userId },
       select: { id: true, password: true, email: true, firstName: true },
     });
-    if (!user) throw new BadRequestException('Usuário não encontrado');
+    if (!user) throw new BadRequestException('User not found');
 
     const hasLocalPassword = !!(user.password && String(user.password).trim().length > 0);
     if (hasLocalPassword) {
       if (!currentPassword || currentPassword.trim().length === 0) {
-        throw new BadRequestException('Senha atual é obrigatória para trocar a senha');
+        throw new BadRequestException('Your current password is required to change it');
       }
       const valid = await bcrypt.compare(currentPassword, user.password!);
-      if (!valid) throw new UnauthorizedException('Senha atual incorreta');
+      if (!valid) throw new UnauthorizedException('Current password is incorrect');
       const same = await bcrypt.compare(newPassword, user.password!);
-      if (same) throw new BadRequestException('A nova senha não pode ser igual à senha atual');
+      if (same) throw new BadRequestException('The new password must be different from the current one');
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 12);
@@ -513,7 +520,7 @@ export class AuthService {
     });
 
     this.notifyPasswordChanged(user.email, user.firstName, userAgent, ip);
-    return { success: true, message: 'Senha alterada com sucesso' };
+    return { success: true, message: 'Password changed' };
   }
 
   async changeEmail(
@@ -527,24 +534,24 @@ export class AuthService {
       where: { id: userId },
       select: { id: true, email: true, firstName: true, password: true },
     });
-    if (!user) throw new BadRequestException('Usuário não encontrado');
+    if (!user) throw new BadRequestException('User not found');
     if (!user.password || String(user.password).trim().length === 0) {
-      throw new BadRequestException('Conta sem senha local — gerencie o e-mail pela conta Google');
+      throw new BadRequestException('This account has no local password — manage the email through Google');
     }
 
     const valid = await bcrypt.compare(currentPassword, user.password);
-    if (!valid) throw new UnauthorizedException('Senha incorreta');
+    if (!valid) throw new UnauthorizedException('Incorrect password');
 
     const normalizedEmail = newEmail.toLowerCase().trim();
     if (normalizedEmail === user.email.toLowerCase()) {
-      throw new BadRequestException('O novo e-mail deve ser diferente do atual');
+      throw new BadRequestException('The new email must be different from the current one');
     }
 
     const existing = await this.prisma.getReadClient().user.findUnique({
       where: { email: normalizedEmail },
       select: { id: true },
     });
-    if (existing) throw new BadRequestException('Este e-mail já está em uso');
+    if (existing) throw new BadRequestException('This email is already in use');
 
     const code = String(crypto.randomInt(100000, 1000000));
     const ttl = 15 * 60 * 1000;
@@ -577,21 +584,21 @@ export class AuthService {
       )
       .catch((err) => this.logger.warn('Falha ao enviar verificação de troca de e-mail:', err));
 
-    return { success: true, message: 'Código de verificação enviado para o seu e-mail atual.' };
+    return { success: true, message: 'Verification code sent to your current email.' };
   }
 
   async verifyEmailChange(userId: string, code: string) {
     const cacheKey = `email_change:${userId}`;
     const cached = await this.cacheManager.get<any>(cacheKey);
-    if (!cached) throw new BadRequestException('Código inválido ou expirado');
-    if (new Date(cached.expiresAt) < new Date()) throw new BadRequestException('Código expirado');
+    if (!cached) throw new BadRequestException('Invalid or expired code');
+    if (new Date(cached.expiresAt) < new Date()) throw new BadRequestException('Code expired');
     if ((cached.attempts ?? 0) >= 5) {
-      throw new BadRequestException('Muitas tentativas inválidas. Solicite um novo código');
+      throw new BadRequestException('Too many invalid attempts. Request a new code');
     }
 
     cached.attempts = (cached.attempts ?? 0) + 1;
     await this.cacheManager.set(cacheKey, cached, 15 * 60 * 1000);
-    if (cached.code !== code) throw new BadRequestException('Código inválido');
+    if (cached.code !== code) throw new BadRequestException('Invalid code');
 
     try {
       await this.prisma.getWriteClient().user.update({
@@ -600,7 +607,7 @@ export class AuthService {
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        throw new BadRequestException('Este e-mail já está em uso');
+        throw new BadRequestException('This email is already in use');
       }
       throw error;
     }
@@ -619,7 +626,7 @@ export class AuthService {
       )
       .catch((err) => this.logger.warn('Falha ao notificar e-mail alterado:', err));
 
-    return { success: true, message: 'E-mail alterado com sucesso.' };
+    return { success: true, message: 'Email changed.' };
   }
 
   // ─────────────────────────── Google OAuth ───────────────────────────
@@ -652,6 +659,12 @@ export class AuthService {
         } else {
           // Conta nova só-Google: sem senha local (login tradicional indisponível
           // até definir senha via reset). e-mail já verificado pelo Google.
+          // Indicação só aqui, na CRIAÇÃO. Nos outros dois ramos a conta já
+          // existe, e regravar o padrinho num login seguinte deixaria qualquer
+          // um roubar a atribuição de uma venda já feita.
+          const referredById = await this.affiliates.resolveReferrer(
+            googleUser.referralCode,
+          );
           user = await prismaWrite.user.create({
             data: {
               email: googleUser.email,
@@ -663,6 +676,7 @@ export class AuthService {
               emailVerified: true,
               acceptedTerms: true,
               acceptedPrivacyPolicy: true,
+              referredById,
             },
           });
         }
@@ -673,15 +687,19 @@ export class AuthService {
       return await this.usersService.hydrateGoogleAvatar(user, googleUser.avatarUrl);
     } catch (error) {
       this.logger.error('Erro ao validar usuário Google:', error);
-      throw new BadRequestException('Falha ao autenticar com o Google');
+      throw new BadRequestException('Google sign-in failed');
     }
   }
 
   /** Troca o code do Google por tokens, obtém o perfil e faz login. */
-  async validateGoogleCode(code: string, redirectUri: string): Promise<any> {
+  async validateGoogleCode(
+    code: string,
+    redirectUri: string,
+    referralCode?: string,
+  ): Promise<any> {
     const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
     const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
-    if (!clientId || !clientSecret) throw new BadRequestException('Google OAuth não configurado');
+    if (!clientId || !clientSecret) throw new BadRequestException('Google OAuth is not configured');
 
     try {
       const tokenResponse = await firstValueFrom(
@@ -694,7 +712,7 @@ export class AuthService {
         }),
       );
       const { access_token } = tokenResponse.data;
-      if (!access_token) throw new BadRequestException('Falha ao trocar código Google por tokens');
+      if (!access_token) throw new BadRequestException('Could not exchange the Google code for tokens');
 
       const userInfo = await firstValueFrom(
         this.httpService.get('https://www.googleapis.com/oauth2/v2/userinfo', {
@@ -704,7 +722,7 @@ export class AuthService {
       const g = userInfo.data;
       // e-mail não verificado → account takeover (vínculo por e-mail). Rejeita.
       if (g.verified_email === false) {
-        throw new UnauthorizedException('E-mail da conta Google não verificado');
+        throw new UnauthorizedException('The Google account email is not verified');
       }
 
       const user = await this.validateGoogleUser({
@@ -713,12 +731,13 @@ export class AuthService {
         firstName: g.given_name || '',
         lastName: g.family_name || '',
         avatarUrl: g.picture || null,
+        referralCode,
       });
       return this.login(user);
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       this.logger.error('Erro no Google OAuth', error.response?.data);
-      throw new BadRequestException('Falha na autenticação com Google');
+      throw new BadRequestException('Google sign-in failed');
     }
   }
 
@@ -731,10 +750,10 @@ export class AuthService {
 
   async exchangeCodeForTokens(code: string): Promise<any> {
     if (!code || code.length !== 64 || !/^[a-f0-9]+$/i.test(code)) {
-      throw new BadRequestException('Código de autorização inválido');
+      throw new BadRequestException('Invalid authorization code');
     }
     const cached = await this.cacheManager.get(`auth_code:${code}`);
-    if (!cached) throw new BadRequestException('Código inválido ou expirado');
+    if (!cached) throw new BadRequestException('Invalid or expired code');
     await this.cacheManager.del(`auth_code:${code}`); // uso único
     return cached;
   }
@@ -748,7 +767,7 @@ export class AuthService {
   ): Promise<void> {
     const rateLimitKey = `2fa_rate:${userId}`;
     if (await this.cacheManager.get(rateLimitKey)) {
-      throw new BadRequestException('Aguarde 1 minuto antes de solicitar um novo código.');
+      throw new BadRequestException('Wait 1 minute before requesting a new code.');
     }
 
     const code = String(crypto.randomInt(100000, 1000000));
@@ -780,7 +799,7 @@ export class AuthService {
     } catch (emailError) {
       await this.cacheManager.del(cacheKey);
       this.logger.error(`Falha ao enviar código 2FA — usuário ${userId}:`, emailError);
-      throw new BadRequestException('Falha ao enviar o e-mail. Tente novamente.');
+      throw new BadRequestException('Could not send the email. Please try again.');
     }
 
     await this.cacheManager.set(rateLimitKey, true, AuthService.MFA_RATE_TTL_MS);
@@ -811,7 +830,7 @@ export class AuthService {
     await this.verifyAndConsume2FACode(userId, code);
 
     const user = await this.prisma.getWriteClient().user.findUnique({ where: { id: userId } });
-    if (!user) throw new BadRequestException('Usuário não encontrado.');
+    if (!user) throw new BadRequestException('User not found.');
     if (user.deletedAt) return; // idempotente
 
     const now = new Date();
@@ -860,12 +879,12 @@ export class AuthService {
     const attemptsKey = `2fa_attempts:${userId}`;
 
     const stored = await this.cacheManager.get<string>(cacheKey);
-    if (!stored) throw new BadRequestException('Código incorreto ou expirado.');
+    if (!stored) throw new BadRequestException('Incorrect or expired code.');
 
     const attempts = (await this.cacheManager.get<number>(attemptsKey)) || 0;
     if (attempts >= AuthService.MFA_MAX_ATTEMPTS) {
       await this.cacheManager.del(cacheKey);
-      throw new BadRequestException('Muitas tentativas incorretas. Solicite um novo código.');
+      throw new BadRequestException('Too many incorrect attempts. Request a new code.');
     }
 
     const isValid =
@@ -876,7 +895,7 @@ export class AuthService {
       const next = attempts + 1;
       await this.cacheManager.set(attemptsKey, next, AuthService.MFA_CODE_TTL_MS);
       if (next >= AuthService.MFA_MAX_ATTEMPTS) await this.cacheManager.del(cacheKey);
-      throw new BadRequestException('Código incorreto ou expirado.');
+      throw new BadRequestException('Incorrect or expired code.');
     }
 
     await this.cacheManager.del(cacheKey);
@@ -898,7 +917,7 @@ export class AuthService {
 
   private async createRefreshToken(userId: string): Promise<string> {
     const refreshSecret = this.resolveRefreshSecret();
-    if (!refreshSecret) throw new UnauthorizedException('JWT secret não configurado');
+    if (!refreshSecret) throw new UnauthorizedException('JWT secret is not configured');
     const expiresIn = this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '7d';
     return this.jwtService.sign({ sub: userId }, { secret: refreshSecret, expiresIn } as any);
   }

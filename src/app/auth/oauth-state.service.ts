@@ -3,6 +3,10 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import { sanitizeRelativePath } from '../../common/utils/safe-redirect.util';
+import {
+  normalizeReferralCode,
+  referralCodeError,
+} from '../affiliates/commission';
 
 /**
  * Serializa/valida o parâmetro `state` do OAuth (round-trip pelo Google).
@@ -30,11 +34,19 @@ export class OAuthStateService {
     this.secret = this.config.get<string>('JWT_SECRET') ?? '';
   }
 
-  /** Assina o state com o destino saneado. `redirect_to` inválido vira ausente (login no default). */
-  sign(redirectTo?: string | null): string {
+  /**
+   * Assina o state com o destino e o código de indicação saneados.
+   * `redirect_to` inválido vira ausente (login no default); código inválido
+   * também (cadastro sem atribuição — nunca um erro na cara do usuário).
+   */
+  sign(redirectTo?: string | null, referralCode?: string | null): string {
     const safe = sanitizeRelativePath(redirectTo);
     return this.jwt.sign(
-      { rt: safe ?? undefined, n: crypto.randomBytes(16).toString('hex') },
+      {
+        rt: safe ?? undefined,
+        ref: safeReferral(referralCode) ?? undefined,
+        n: crypto.randomBytes(16).toString('hex'),
+      },
       { secret: this.secret, expiresIn: OAuthStateService.TTL },
     );
   }
@@ -43,14 +55,35 @@ export class OAuthStateService {
    * Valida o state e devolve o destino saneado (ou `null` se ausente/expirado/adulterado).
    * NUNCA lança — falha de state não pode quebrar o login; cai no destino default.
    */
-  verify(state?: string | null): { redirectTo: string | null } {
-    if (!state) return { redirectTo: null };
+  verify(state?: string | null): {
+    redirectTo: string | null;
+    referralCode: string | null;
+  } {
+    if (!state) return { redirectTo: null, referralCode: null };
     try {
-      const payload = this.jwt.verify<{ rt?: string }>(state, { secret: this.secret });
-      return { redirectTo: sanitizeRelativePath(payload?.rt) };
+      const payload = this.jwt.verify<{ rt?: string; ref?: string }>(state, {
+        secret: this.secret,
+      });
+      return {
+        redirectTo: sanitizeRelativePath(payload?.rt),
+        referralCode: safeReferral(payload?.ref),
+      };
     } catch (err) {
-      this.logger.warn(`OAuth state inválido/expirado: ${(err as Error).message}`);
-      return { redirectTo: null };
+      this.logger.warn(
+        `OAuth state inválido/expirado: ${(err as Error).message}`,
+      );
+      return { redirectTo: null, referralCode: null };
     }
   }
+}
+
+/**
+ * Código de indicação saneado, ou null. Saneia na ASSINATURA e de novo na
+ * VERIFICAÇÃO pelo mesmo motivo do `redirect_to`: defesa em profundidade — um
+ * state antigo, assinado antes desta regra existir, não vira entrada crua.
+ */
+function safeReferral(raw?: string | null): string | null {
+  if (!raw) return null;
+  const code = normalizeReferralCode(raw);
+  return referralCodeError(code) ? null : code;
 }

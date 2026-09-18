@@ -62,6 +62,23 @@ model User {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  /// Código de indicação DESTE usuário (ele como afiliado). Nasce na primeira
+  /// abertura do painel de afiliados, não no cadastro: a maioria das contas
+  /// nunca vai indicar ninguém e um índice único cheio de código morto não paga.
+  referralCode String? @unique
+
+  /// Percentuais NEGOCIADOS deste afiliado, em basis points. Null = usa o
+  /// padrão global (`AffiliateSettings`). É o que permite contratar um
+  /// influenciador com condição própria sem mexer no resto da base.
+  affiliateLevel1Bps Int?
+  affiliateLevel2Bps Int?
+
+  /// Quem indicou ESTE usuário. Gravado no cadastro e imutável depois — mudar
+  /// de padrinho depois da venda é exatamente o abuso que o programa convida.
+  referredById String?
+  referredBy   User?   @relation("Referrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals    User[]  @relation("Referrals")
+
   wallets         Wallet[]
   snapshots       MetricSnapshot[]
   sources         Source[]
@@ -71,8 +88,13 @@ model User {
   subscription    Subscription?
   lessonProgress  LessonProgress[]
 
+  commissionsEarned    ReferralCommission[] @relation("AffiliateCommissions")
+  commissionsGenerated ReferralCommission[] @relation("ReferredCommissions")
+
   @@index([googleId])
   @@index([deletedAt])
+  /// "Quantos usuários indiquei" e a listagem do painel.
+  @@index([referredById])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -877,4 +899,77 @@ model LessonProgress {
   /// "Continue de onde parou" = a linha mais recente do usuário. Sem este
   /// índice a consulta varre todo o progresso da base a cada abertura da tela.
   @@index([userId, updatedAt(sort: Desc)])
+}
+
+// ─────────────────────────── Programa de afiliados ───────────────────────────
+
+/// Estado do repasse ao afiliado. O pagamento sai POR FORA do sistema (Pix,
+/// transferência); aqui só registramos o que é devido e o que já foi quitado —
+/// por isso não há nada de provedor de pagamento neste model.
+enum CommissionStatus {
+  PENDING
+  PAID
+}
+
+/// Uma comissão por FATURA paga de um indicado (20% recorrente enquanto ele
+/// for PRO). Uma linha por fatura, não por assinatura: é o que permite somar
+/// "ganhos do mês" sem recalcular nada e o que torna o acúmulo idempotente.
+model ReferralCommission {
+  id String @id @default(cuid())
+
+  /// Quem recebe (o dono do código usado no cadastro).
+  affiliateId String
+  affiliate   User   @relation("AffiliateCommissions", fields: [affiliateId], references: [id], onDelete: Cascade)
+
+  /// Quem pagou a fatura que gerou esta comissão.
+  referredUserId String
+  referredUser   User   @relation("ReferredCommissions", fields: [referredUserId], references: [id], onDelete: Cascade)
+
+  /// Fatura no provedor.
+  providerInvoiceId String
+
+  /// 1 = quem indicou direto; 2 = quem indicou o indicador.
+  /// Uma fatura gera ATÉ DUAS linhas, uma por nível — por isso a trava de
+  /// idempotência é (fatura, nível) e não a fatura sozinha.
+  level Int @default(1)
+
+  /// Quanto o indicado pagou e a fatia do afiliado, em centavos da MESMA moeda.
+  paidAmountCents Int
+  amountCents     Int
+  currency        String @default("usd")
+
+  /// Percentual aplicado, em basis points (2000 = 20%), gravado POR FATURA:
+  /// mudar a regra amanhã não reescreve o que já foi apurado.
+  rateBps Int
+
+  status CommissionStatus @default(PENDING)
+  /// Quando o repasse foi feito por fora — preenchido à mão pelo financeiro.
+  paidAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  /// O Stripe reentrega `invoice.paid`; sem isto a mesma fatura pagaria duas vezes.
+  @@unique([providerInvoiceId, level])
+  /// Histórico do painel: as comissões de um afiliado, mais recentes primeiro.
+  @@index([affiliateId, createdAt(sort: Desc)])
+  /// "Available earnings" = soma das PENDING de um afiliado.
+  @@index([affiliateId, status])
+}
+
+/// Percentuais PADRÃO do programa de afiliados, em basis points.
+///
+/// Linha única (`id` fixo): é configuração do produto, não entidade. Os
+/// valores gravados aqui só valem para comissões FUTURAS — cada
+/// `ReferralCommission` guarda o `rateBps` que usou, então mudar o padrão
+/// nunca reescreve o que já foi apurado.
+model AffiliateSettings {
+  /// Sempre "default". O `@id` com valor fixo é o que garante a linha única.
+  id String @id @default("default")
+
+  /// Quem indicou DIRETO (João → José).
+  level1Bps Int @default(2000)
+  /// Quem indicou o indicador (João ganha de novo quando José traz o Joel).
+  level2Bps Int @default(500)
+
+  updatedAt DateTime @updatedAt
 }

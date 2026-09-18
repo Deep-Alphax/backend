@@ -35,7 +35,7 @@ export class PlanGuard implements CanActivate {
 
     const request = context.switchToHttp().getRequest();
     const userId = request.user?.id;
-    if (!userId) throw new UnauthorizedException('Usuário não autenticado');
+    if (!userId) throw new UnauthorizedException('Not signed in');
 
     if (await this.entitlements.hasPlan(userId, required)) return true;
 

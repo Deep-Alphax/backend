@@ -6,6 +6,7 @@ import { HttpModule } from '@nestjs/axios';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { CommonModule } from '../../common/common.module';
 import { UsersModule } from '../users/users.module';
+import { AffiliatesModule } from '../affiliates/affiliates.module';
 import { EmailService } from '../../common/services/email.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
@@ -23,6 +24,7 @@ import { AuthController } from './auth.controller';
     HttpModule,
     CommonModule,
     UsersModule,
+    AffiliatesModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

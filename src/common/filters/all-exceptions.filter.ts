@@ -81,20 +81,20 @@ export class AllExceptionsFilter implements ExceptionFilter {
         const fieldsTxt = labels.length ? ` para: ${labels.join(', ')}` : '';
         return {
           status: HttpStatus.CONFLICT,
-          message: `Valor já cadastrado${fieldsTxt}. Verifique os dados e tente novamente.`,
+          message: `Already registered${fieldsTxt}. Check the values and try again.`,
           code: 'DUPLICATE_VALUE',
         };
       }
       case 'P2025': // registro exigido pela operação não existe (update/delete)
         return {
           status: HttpStatus.NOT_FOUND,
-          message: 'Registro não encontrado.',
+          message: 'Record not found.',
           code: 'RECORD_NOT_FOUND',
         };
       case 'P2003': // violação de chave estrangeira
         return {
           status: HttpStatus.CONFLICT,
-          message: 'Operação não permitida: existem registros vinculados a este item.',
+          message: 'Not allowed: there are records linked to this item.',
           code: 'RELATED_RECORDS_EXIST',
         };
       default:

@@ -253,7 +253,7 @@ export class MentorshipService implements OnModuleInit {
       where: { id: lessonId, published: true, module: { published: true } },
       select: { id: true, durationSec: true },
     });
-    if (!lesson) throw new NotFoundException('Aula não encontrada.');
+    if (!lesson) throw new NotFoundException('Lesson not found.');
 
     const raw = dto.positionSec ?? 0;
     const positionSec =
