@@ -2,9 +2,8 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
-import { EntitlementsService } from './entitlements.service';
+import { EntitlementsModule } from './entitlements.module';
 import { StripeService } from './stripe.service';
-import { PlanGuard } from './guards/plan.guard';
 import { AffiliatesModule } from '../affiliates/affiliates.module';
 
 /**
@@ -16,9 +15,9 @@ import { AffiliatesModule } from '../affiliates/affiliates.module';
  * naqueles dois, e o gate de acesso continua igual.
  */
 @Module({
-  imports: [PrismaModule, AffiliatesModule],
+  imports: [PrismaModule, AffiliatesModule, EntitlementsModule],
   controllers: [BillingController],
-  providers: [StripeService, BillingService, EntitlementsService, PlanGuard],
-  exports: [EntitlementsService, PlanGuard],
+  providers: [StripeService, BillingService],
+  exports: [EntitlementsModule],
 })
 export class BillingModule {}

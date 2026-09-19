@@ -18,6 +18,7 @@ import { WalletReaderModule } from './app/wallet-reader/wallet-reader.module';
 import { BillingModule } from './app/billing/billing.module';
 import { MentorshipModule } from './app/mentorship/mentorship.module';
 import { AffiliatesModule } from './app/affiliates/affiliates.module';
+import { AlertsModule } from './app/alerts/alerts.module';
 import { getCacheConfig } from './config/cache.config';
 import { IpThrottlerGuard } from './common/guards/ip-throttler.guard';
 import { RequestOriginGuard } from './common/guards/request-origin.guard';
@@ -51,6 +52,7 @@ import { ConcurrencyLimiterMiddleware } from './common/middleware/concurrency-li
     BillingModule,
     MentorshipModule,
     AffiliatesModule,
+    AlertsModule,
   ],
   providers: [
     ConcurrencyLimiterMiddleware,

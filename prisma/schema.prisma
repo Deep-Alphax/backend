@@ -79,14 +79,17 @@ model User {
   referredBy   User?   @relation("Referrals", fields: [referredById], references: [id], onDelete: SetNull)
   referrals    User[]  @relation("Referrals")
 
-  wallets         Wallet[]
-  snapshots       MetricSnapshot[]
-  sources         Source[]
-  catalog         WalletCatalog[]
-  favoriteAuthors FavoriteAuthor[]
-  kolOverrides    KolUserOverride[]
-  subscription    Subscription?
-  lessonProgress  LessonProgress[]
+  wallets           Wallet[]
+  snapshots         MetricSnapshot[]
+  sources           Source[]
+  catalog           WalletCatalog[]
+  favoriteAuthors   FavoriteAuthor[]
+  kolOverrides      KolUserOverride[]
+  subscription      Subscription?
+  lessonProgress    LessonProgress[]
+  alertRules        AlertRule[]
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
 
   commissionsEarned    ReferralCommission[] @relation("AffiliateCommissions")
   commissionsGenerated ReferralCommission[] @relation("ReferredCommissions")
@@ -608,6 +611,11 @@ model DiscordMonitor {
   waitForBotReply Boolean @default(true)
   isActive        Boolean @default(true)
 
+  /// Grupo liberado para o plano FREE (o admin escolhe quais). FREE só recebe
+  /// capturas destes; PRO recebe todas. Default `false`: grupo novo nasce PRO,
+  /// então esquecer de marcar nunca vaza conteúdo pago.
+  freeTier Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -616,6 +624,7 @@ model DiscordMonitor {
   @@index([channelId])
   @@index([guildId])
   @@index([isActive])
+  @@index([freeTier])
 }
 
 // Mensagem capturada de um canal monitorado (feed cru). Global (não é por usuário)
@@ -645,7 +654,8 @@ model CapturedMessage {
 
   createdAt DateTime @default(now())
 
-  calls MessageCall[]
+  calls         MessageCall[]
+  notifications Notification[]
 
   @@index([channelId])
   @@index([monitorId])
@@ -972,4 +982,94 @@ model AffiliateSettings {
   level2Bps Int @default(500)
 
   updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────── Alertas ───────────────────────────────
+
+/// O que dispara um alerta quando uma captura nova chega no feed.
+enum AlertKind {
+  /// Autor específico postou (chave = `authorTag`, a mesma do follow).
+  AUTHOR
+  /// Captura num canal específico (chave = `channelId`).
+  CHANNEL
+  /// Texto da captura contém um termo (ticker, CA, palavra) — case-insensitive.
+  KEYWORD
+}
+
+/// Regra de alerta do usuário. FREE tem 1, PRO ilimitadas (`plan-limits.ts`).
+///
+/// Quem já tinha mais regras e caiu para FREE NÃO perde nada: as regras ficam,
+/// mas só a mais antiga ativa é avaliada. Voltar ao PRO religa todas.
+model AlertRule {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  kind  AlertKind
+  /// Chave do alvo, já normalizada: authorTag / channelId exatos; KEYWORD em
+  /// minúsculas (o match é case-insensitive).
+  value String
+  /// Rótulo de exibição (nome do canal, apelido do autor) — só UI.
+  label String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  notifications Notification[]
+
+  /// A mesma regra duas vezes dispararia a mesma notificação duas vezes.
+  @@unique([userId, kind, value])
+  /// Casamento no hot path: "quem quer saber deste autor/canal?".
+  @@index([kind, value, isActive])
+  @@index([userId, createdAt])
+}
+
+/// Notificação entregue a um usuário (sininho do site + push).
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ruleId String?
+  rule   AlertRule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+
+  capturedMessageId String
+  capturedMessage   CapturedMessage @relation(fields: [capturedMessageId], references: [id], onDelete: Cascade)
+
+  title String
+  body  String
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  /// Uma captura que casa com várias regras do mesmo usuário vira UMA
+  /// notificação — e o `createMany({ skipDuplicates })` torna a entrega
+  /// idempotente se o evento for processado duas vezes.
+  @@unique([userId, capturedMessageId])
+  /// Lista do sininho, mais recentes primeiro (paginação por cursor).
+  @@index([userId, createdAt(sort: Desc)])
+  /// Contador de não lidas.
+  @@index([userId, readAt])
+}
+
+/// Inscrição de Web Push de um navegador. Um usuário pode ter várias
+/// (desktop + celular). O `endpoint` é o identificador do navegador no
+/// serviço de push; quando o serviço responde 404/410 a linha é apagada.
+model PushSubscription {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  endpoint String @unique
+  p256dh   String
+  auth     String
+
+  userAgent String?
+
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  @@index([userId])
 }

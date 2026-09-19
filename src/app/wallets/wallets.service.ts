@@ -9,6 +9,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { WalletSyncService } from '../analytics/ingestion/wallet-sync.service';
 import { CatalogWalletDto, UpdateWalletDto } from './dto/wallet.dto';
 import { normalizeWalletAddress } from './wallet-address.util';
+import { EntitlementsService } from '../billing/entitlements.service';
+import { planLimitError } from '../billing/plan-limits';
 
 /** Projeção pública da carteira canônica (esconde cursor/erro internos de sync). */
 const WALLET_SELECT = {
@@ -35,13 +37,34 @@ const CATALOG_SELECT = {
 export class WalletsService {
   private readonly logger = new Logger(WalletsService.name);
 
-  /** Teto de carteiras catalogadas por usuário — barra abuso/enumeração. */
-  private static readonly MAX_WALLETS_PER_USER = 50;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly walletSync: WalletSyncService,
+    private readonly entitlements: EntitlementsService,
   ) {}
+
+  /**
+   * Teto de carteiras do PLANO (FREE 1, PRO 20 — `plan-limits.ts`). Conta TODO o
+   * catálogo do usuário, inclusive as de sources: é o mesmo custo de sync para
+   * nós, venha a carteira de onde vier. Também é o que barra abuso/enumeração.
+   *
+   * Público para o `SourcesService` usar a MESMA regra ao adicionar carteira a
+   * uma fonte — dois tetos diferentes seriam contornáveis por um dos caminhos.
+   */
+  async assertWalletQuota(userId: string): Promise<void> {
+    const [{ trackedWallets: limit }, count] = await Promise.all([
+      this.entitlements.limitsFor(userId),
+      this.prisma.getWriteClient().walletCatalog.count({ where: { userId } }),
+    ]);
+    if (count >= limit) {
+      throw planLimitError(
+        limit === 1
+          ? 'The Free plan tracks 1 wallet. Upgrade to Pro to track up to 20.'
+          : `You reached the limit of ${limit} tracked wallets.`,
+        limit,
+      );
+    }
+  }
 
   /** Achata a entrada de catálogo + carteira canônica no formato público. */
   private toPublic(entry: {
@@ -103,12 +126,7 @@ export class WalletsService {
     });
 
     if (!existing) {
-      const count = await write.walletCatalog.count({ where: { userId } });
-      if (count >= WalletsService.MAX_WALLETS_PER_USER) {
-        throw new BadRequestException(
-          `You reached the limit of ${WalletsService.MAX_WALLETS_PER_USER} wallets per account.`,
-        );
-      }
+      await this.assertWalletQuota(userId);
     }
 
     // Upsert da carteira CANÔNICA (compartilhada) por (chain, addressNorm).

@@ -42,7 +42,7 @@ export class PlanGuard implements CanActivate {
     throw new ForbiddenException({
       code: 'PLAN_REQUIRED',
       requiredPlan: required,
-      message: `Este recurso exige o plano ${required}.`,
+      message: `This feature requires the ${required} plan.`,
     });
   }
 }

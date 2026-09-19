@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
+import { WalletsModule } from '../wallets/wallets.module';
 import { SourcesController } from './sources.controller';
 import { SourcesService } from './sources.service';
 import { SourceSyncListener } from './source-sync.listener';
@@ -12,7 +13,7 @@ import { SourceSyncListener } from './source-sync.listener';
  * a ingestão a este módulo.
  */
 @Module({
-  imports: [PrismaModule, AnalyticsModule],
+  imports: [PrismaModule, AnalyticsModule, WalletsModule],
   controllers: [SourcesController],
   providers: [SourcesService, SourceSyncListener],
   exports: [SourcesService],

@@ -7,6 +7,7 @@ import { WalletReaderService } from './wallet-reader.service';
 import { KolIndexController } from './kol-index.controller';
 import { KolAdminController } from './kol-admin.controller';
 import { KolIndexService } from './kol-index.service';
+import { EntitlementsModule } from '../billing/entitlements.module';
 
 /**
  * Wallet Reader (KOL Index): o índice em duas camadas (preset global + override
@@ -16,7 +17,7 @@ import { KolIndexService } from './kol-index.service';
  * mesmo provider de swaps da ingestão em vez de abrir uma segunda fonte.
  */
 @Module({
-  imports: [HttpModule, ConfigModule, AnalyticsModule],
+  imports: [HttpModule, ConfigModule, AnalyticsModule, EntitlementsModule],
   controllers: [WalletReaderController, KolIndexController, KolAdminController],
   providers: [WalletReaderService, KolIndexService],
 })

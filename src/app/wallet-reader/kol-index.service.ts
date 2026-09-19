@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { EntitlementsService } from '../billing/entitlements.service';
 import KOL_PROFILES from './data/kol-profiles.json';
 import {
   CreateKolCustomDto,
@@ -119,6 +120,8 @@ export interface KolStateView {
   notes: string;
   avatar: string | null;
   dismissedSidewallets: string[];
+  /** Só no `getOne`: `true` quando `wallets` veio vazia por ser FREE. */
+  walletsLocked?: boolean;
 }
 
 /**
@@ -142,6 +145,8 @@ export interface KolIndexPage {
   viewCounts: Record<string, number>;
   /** Todo squad visível ao usuário — preset + conta —, ordenado. */
   squads: string[];
+  /** `true` no FREE: as carteiras dos KOLs são recurso do PRO (upsell na UI). */
+  walletsLocked: boolean;
 }
 
 /** Linha da lista de admin: o preset sem os endereços, só a contagem. */
@@ -179,7 +184,39 @@ interface SeedProfile {
 export class KolIndexService implements OnModuleInit {
   private readonly logger = new Logger(KolIndexService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly entitlements: EntitlementsService,
+  ) {}
+
+  /**
+   * FREE vê o índice de KOLs, mas NÃO as carteiras (decisão de produto: é o que
+   * o PRO compra). A regra vale nas duas direções:
+   *  - leitura: endereços somem do modal, do backup e da busca (buscar por
+   *    endereço viraria oráculo de "de quem é esta carteira");
+   *  - escrita: campos de carteira são IGNORADOS. O modal manda a lista efetiva
+   *    no Salvar — para o FREE ela chega vazia, e sem esta trava viraria
+   *    "removeu todas as carteiras do preset" gravado na conta dele.
+   */
+  private async canSeeWallets(userId: string): Promise<boolean> {
+    return (await this.entitlements.limitsFor(userId)).kolWallets;
+  }
+
+  /** Tira do patch tudo que é carteira (FREE). Muta e devolve o mesmo objeto. */
+  private stripWalletFields<
+    T extends {
+      wallets?: unknown;
+      walletsAdded?: unknown;
+      walletsRemoved?: unknown;
+      dismissedSidewallets?: unknown;
+    },
+  >(dto: T): T {
+    delete dto.wallets;
+    delete dto.walletsAdded;
+    delete dto.walletsRemoved;
+    delete dto.dismissedSidewallets;
+    return dto;
+  }
 
   /** Seed do preset a partir do JSON (1×, só se a tabela estiver vazia). */
   async onModuleInit(): Promise<void> {
@@ -215,10 +252,11 @@ export class KolIndexService implements OnModuleInit {
    */
   async getIndex(userId: string, q: KolQueryDto = {}): Promise<KolIndexPage> {
     const db = this.prisma.getReadClient();
-    const [preset, overrides, scanned] = await Promise.all([
+    const [preset, overrides, scanned, walletsVisible] = await Promise.all([
       db.kolPreset.findMany({ where: { deletedAt: null } }),
       db.kolUserOverride.findMany({ where: { userId } }),
       db.walletScan.findMany({ select: { kolId: true } }),
+      this.canSeeWallets(userId),
     ]);
 
     const overrideBy = new Map(overrides.map((o) => [o.kolId, o]));
@@ -256,10 +294,11 @@ export class KolIndexService implements OnModuleInit {
     const base = states.filter((st) => {
       if (!inView(st)) return false;
       if (!term) return true;
+      // FREE busca só pelo nome: casar por endereço revelaria de quem é a carteira.
       const hay = (
-        st.name +
-        ' ' +
-        st.wallets.map((w) => `${w.name} ${w.address}`).join(' ')
+        walletsVisible
+          ? st.name + ' ' + st.wallets.map((w) => `${w.name} ${w.address}`).join(' ')
+          : st.name
       ).toLowerCase();
       return hay.includes(term);
     });
@@ -323,18 +362,23 @@ export class KolIndexService implements OnModuleInit {
       squads: Array.from(new Set(states.flatMap((st) => st.squads))).sort((a, b) =>
         a.localeCompare(b),
       ),
+      walletsLocked: !walletsVisible,
     };
   }
 
   /** Estado EFETIVO de UM KOL — o modal abre por aqui. */
   async getOne(userId: string, kolId: string): Promise<KolStateView> {
     const db = this.prisma.getReadClient();
-    const [preset, override] = await Promise.all([
+    const [preset, override, walletsVisible] = await Promise.all([
       db.kolPreset.findFirst({ where: { id: kolId, deletedAt: null } }),
       db.kolUserOverride.findUnique({ where: { userId_kolId: { userId, kolId } } }),
+      this.canSeeWallets(userId),
     ]);
     if (!preset && !override) throw new NotFoundException('KOL not found');
-    return this.mergeState(kolId, preset, override);
+    const state = this.mergeState(kolId, preset, override);
+    if (walletsVisible) return { ...state, walletsLocked: false };
+    // `walletCount` fica: é o que o card já mostra e serve de chamariz do PRO.
+    return { ...state, wallets: [], dismissedSidewallets: [], walletsLocked: true };
   }
 
   /**
@@ -415,8 +459,12 @@ export class KolIndexService implements OnModuleInit {
   ): Promise<KolOverrideView> {
     // Só aceita KOL que exista no preset ou que já seja custom DESTE usuário —
     // sem isso, qualquer id inventado viraria linha no banco.
-    const known = await this.isKnownKol(userId, kolId);
+    const [known, walletsVisible] = await Promise.all([
+      this.isKnownKol(userId, kolId),
+      this.canSeeWallets(userId),
+    ]);
     if (!known) throw new NotFoundException('KOL not found');
+    if (!walletsVisible) this.stripWalletFields(dto);
 
     const data = this.overrideData(dto);
 
@@ -457,6 +505,8 @@ export class KolIndexService implements OnModuleInit {
     dto: CreateKolCustomDto,
   ): Promise<KolOverrideView> {
     const kolId = `custom-${randomBytes(6).toString('hex')}`;
+    const walletsVisible = await this.canSeeWallets(userId);
+    const wallet = walletsVisible ? dto.wallet : undefined;
     const row = await this.prisma.getWriteClient().kolUserOverride.create({
       data: {
         userId,
@@ -465,7 +515,7 @@ export class KolIndexService implements OnModuleInit {
         name: dto.name,
         relevance: 20,
         types: [] as unknown as Prisma.InputJsonValue,
-        walletsAdded: (dto.wallet ? [dto.wallet] : []) as unknown as Prisma.InputJsonValue,
+        walletsAdded: (wallet ? [wallet] : []) as unknown as Prisma.InputJsonValue,
       },
     });
     return this.toOverrideView(row);
@@ -496,12 +546,15 @@ export class KolIndexService implements OnModuleInit {
     const legacyNames = new Map((dto.groups ?? []).map((g) => [g.id, g.name]));
 
     const db = this.prisma.getWriteClient();
-    const presetIds = new Set(
-      (await db.kolPreset.findMany({ select: { id: true } })).map((p) => p.id),
-    );
+    const [presetRows, walletsVisible] = await Promise.all([
+      db.kolPreset.findMany({ select: { id: true } }),
+      this.canSeeWallets(userId),
+    ]);
+    const presetIds = new Set(presetRows.map((p) => p.id));
 
     let imported = 0;
     for (const { kolId, fnfGroups, ...patch } of dto.overrides ?? []) {
+      if (!walletsVisible) this.stripWalletFields(patch);
       // `squads` do arquivo novo vence; `fnfGroups` só entra traduzido, e um id
       // sem nome conhecido é descartado (era ponteiro para grupo de outra conta).
       if (patch.squads === undefined && fnfGroups) {
@@ -599,7 +652,10 @@ export class KolIndexService implements OnModuleInit {
     customIds: string[];
   }> {
     const db = this.prisma.getReadClient();
-    const rows = await db.kolUserOverride.findMany({ where: { userId } });
+    const [rows, walletsVisible] = await Promise.all([
+      db.kolUserOverride.findMany({ where: { userId } }),
+      this.canSeeWallets(userId),
+    ]);
     const overrides: Record<string, unknown> = {};
     for (const r of rows) {
       const { kolId, name, relevance, types, squads, twitter, notes, avatar } = r;
@@ -611,9 +667,12 @@ export class KolIndexService implements OnModuleInit {
         twitter,
         notes,
         avatar,
-        walletsAdded: r.walletsAdded,
-        walletsRemoved: r.walletsRemoved,
-        dismissedSidewallets: r.dismissedSidewallets,
+        // FREE: o backup sai sem carteiras (e o import também as ignora).
+        ...(walletsVisible && {
+          walletsAdded: r.walletsAdded,
+          walletsRemoved: r.walletsRemoved,
+          dismissedSidewallets: r.dismissedSidewallets,
+        }),
         deleted: r.deleted,
       };
     }

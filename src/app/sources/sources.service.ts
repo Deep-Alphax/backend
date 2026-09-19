@@ -11,6 +11,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CandleService } from '../analytics/candle.service';
 import { CandlePoint } from '../analytics/profile-metrics.types';
 import { normalizeWalletAddress } from '../wallets/wallet-address.util';
+import { WalletsService } from '../wallets/wallets.service';
 import {
   CreateSourceDto,
   UpdateSourceDto,
@@ -100,6 +101,7 @@ export class SourcesService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly wallets: WalletsService,
     // Capture (Bloco 2) é OPCIONAL: sem candles, o breakdown vem com capture=null.
     @Optional() private readonly candles?: CandleService,
   ) {}
@@ -133,7 +135,9 @@ export class SourcesService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('You already have a source with that name.');
+        throw new ConflictException(
+          'You already have a source with that name.',
+        );
       }
       throw error;
     }
@@ -179,7 +183,9 @@ export class SourcesService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('You already have a source with that name.');
+        throw new ConflictException(
+          'You already have a source with that name.',
+        );
       }
       throw error;
     }
@@ -208,9 +214,12 @@ export class SourcesService {
     const count = await write.walletCatalog.count({ where: { sourceId } });
     if (count >= SourcesService.MAX_WALLETS_PER_SOURCE) {
       throw new BadRequestException(
-        `Limite de ${SourcesService.MAX_WALLETS_PER_SOURCE} carteiras por fonte atingido.`,
+        `Limit of ${SourcesService.MAX_WALLETS_PER_SOURCE} wallets per source reached.`,
       );
     }
+    // Teto do PLANO sobre o catálogo inteiro — a mesma regra do cadastro direto,
+    // senão adicionar via fonte contornaria o limite de carteiras do FREE.
+    await this.wallets.assertWalletQuota(userId);
 
     // Upsert da carteira CANÔNICA (compartilhada). O cron de ingestão a drena e sincroniza.
     const wallet = await write.wallet.upsert({

@@ -26,10 +26,13 @@ function makePrisma(rows: OverrideRow[]) {
   };
   return {
     updates,
-    service: new KolIndexService({
-      getReadClient: () => client,
-      getWriteClient: () => client,
-    } as any),
+    service: new KolIndexService(
+      {
+        getReadClient: () => client,
+        getWriteClient: () => client,
+      } as any,
+      { limitsFor: async () => ({ kolWallets: true }) } as any,
+    ),
   };
 }
 

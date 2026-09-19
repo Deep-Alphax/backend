@@ -52,6 +52,7 @@ export class MonitorsService {
         telegramChatId: dto.telegramChatId,
         waitForBotReply: dto.waitForBotReply ?? true,
         isActive: dto.isActive ?? true,
+        freeTier: dto.freeTier ?? false,
       },
     });
     this.events.emit(MONITORS_CHANGED_EVENT);
@@ -80,6 +81,7 @@ export class MonitorsService {
           ? { waitForBotReply: dto.waitForBotReply }
           : {}),
         ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+        ...(dto.freeTier !== undefined ? { freeTier: dto.freeTier } : {}),
       },
     });
     this.events.emit(MONITORS_CHANGED_EVENT);

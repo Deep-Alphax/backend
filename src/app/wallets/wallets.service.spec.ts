@@ -1,6 +1,11 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { Chain, SyncStatus, CatalogRole } from '@prisma/client';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
+import { Chain, SyncStatus, CatalogRole, Plan } from '@prisma/client';
 import { WalletsService } from './wallets.service';
+import { limitsFor } from '../billing/plan-limits';
 
 const EVM_ADDR = '0xd8da6bf26964af9d7eed9e03e53415d37aa96045';
 const EVM_CHECKSUM = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
@@ -33,7 +38,7 @@ const entry = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function makeService() {
+function makeService(plan: Plan = Plan.PRO) {
   const client = {
     wallet: {
       upsert: jest.fn().mockResolvedValue({ id: 'w1' }),
@@ -55,7 +60,10 @@ function makeService() {
     getWriteClient: () => client,
   };
   const walletSync: any = { ensureFresh: jest.fn().mockResolvedValue(true) };
-  const service = new WalletsService(prisma, walletSync);
+  const entitlements: any = {
+    limitsFor: jest.fn().mockResolvedValue(limitsFor(plan)),
+  };
+  const service = new WalletsService(prisma, walletSync, entitlements);
   return { service, client, walletSync };
 }
 
@@ -117,13 +125,35 @@ describe('WalletsService', () => {
       expect(client.walletCatalog.count).not.toHaveBeenCalled();
     });
 
-    it('aplica o teto de carteiras catalogadas por usuário', async () => {
-      const { service, client } = makeService();
-      client.walletCatalog.count.mockResolvedValue(50);
-      await expect(service.catalogWallet(USER, catalogDto())).rejects.toThrow(
-        /limit/i,
-      );
+    it('FREE: a 2ª carteira bate no teto do plano (403 PLAN_LIMIT)', async () => {
+      const { service, client } = makeService('FREE');
+      client.walletCatalog.count.mockResolvedValue(1);
+      const err = await service
+        .catalogWallet(USER, catalogDto())
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ForbiddenException);
+      expect((err as ForbiddenException).getResponse()).toMatchObject({
+        code: 'PLAN_LIMIT',
+        limit: 1,
+      });
       expect(client.wallet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('FREE: a 1ª carteira (a própria) passa', async () => {
+      const { service, client } = makeService('FREE');
+      client.walletCatalog.count.mockResolvedValue(0);
+      await service.catalogWallet(USER, catalogDto());
+      expect(client.wallet.upsert).toHaveBeenCalled();
+    });
+
+    it('PRO: passa até 19 e barra na 21ª', async () => {
+      const { service, client } = makeService('PRO');
+      client.walletCatalog.count.mockResolvedValue(19);
+      await service.catalogWallet(USER, catalogDto());
+      client.walletCatalog.count.mockResolvedValue(20);
+      await expect(service.catalogWallet(USER, catalogDto())).rejects.toThrow(
+        /limit of 20/i,
+      );
     });
 
     it('rejeita endereço inválido com BadRequest (sem tocar no banco)', async () => {

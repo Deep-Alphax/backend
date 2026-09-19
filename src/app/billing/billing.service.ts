@@ -4,8 +4,16 @@ import { Prisma, SubscriptionStatus } from '@prisma/client';
 import type Stripe from 'stripe';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StripeService } from './stripe.service';
-import { epochToDate, mapSubscriptionStatus } from './stripe-mapping';
+import {
+  asStripeId as asId,
+  epochToDate,
+  invoiceSubscriptionId,
+  mapSubscriptionStatus,
+  subscriptionPeriodEnd,
+} from './stripe-mapping';
 import { AffiliatesService } from '../affiliates/affiliates.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { PLAN_CHANGED_EVENT, type PlanChangedEvent } from './plan-events';
 
 /** Eventos que mexem no estado da assinatura. O resto é ignorado (com 200). */
 const HANDLED = new Set([
@@ -31,6 +39,7 @@ export class BillingService {
     private readonly stripeService: StripeService,
     private readonly configService: ConfigService,
     private readonly affiliates: AffiliatesService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -218,9 +227,7 @@ export class BillingService {
 
   /** Renovação paga ou falha de cobrança — reespelha a assinatura da fatura. */
   private async onInvoice(invoice: Stripe.Invoice): Promise<void> {
-    const subscriptionId = asId(
-      (invoice as unknown as { subscription?: unknown }).subscription,
-    );
+    const subscriptionId = invoiceSubscriptionId(invoice);
     if (!subscriptionId) return;
     const subscription =
       await this.stripeService.stripe.subscriptions.retrieve(subscriptionId);
@@ -259,10 +266,7 @@ export class BillingService {
     customerId: string | null,
   ): Promise<void> {
     const status = mapSubscriptionStatus(subscription.status);
-    const periodEnd = epochToDate(
-      (subscription as unknown as { current_period_end?: unknown })
-        .current_period_end,
-    );
+    const periodEnd = subscriptionPeriodEnd(subscription);
 
     const data = {
       status,
@@ -278,22 +282,13 @@ export class BillingService {
       create: { userId, ...data },
       update: data,
     });
+    this.events.emit(PLAN_CHANGED_EVENT, { userId } satisfies PlanChangedEvent);
 
     this.logger.log(
       `Assinatura de ${userId} → ${status}` +
         (periodEnd ? ` até ${periodEnd.toISOString()}` : ''),
     );
   }
-}
-
-/** O Stripe devolve `string | objeto | null` conforme o expand. Normaliza. */
-function asId(value: unknown): string | null {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && 'id' in value) {
-    const id = (value as { id: unknown }).id;
-    return typeof id === 'string' ? id : null;
-  }
-  return null;
 }
 
 export { SubscriptionStatus };

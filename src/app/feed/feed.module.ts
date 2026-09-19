@@ -14,6 +14,8 @@ import { BlacklistService } from './blacklist.service';
 import { FavoritesService } from './favorites.service';
 import { TelegramService } from './telegram.service';
 import { DiscordMonitorService } from './discord-monitor.service';
+import { FeedAccessService } from './feed-access.service';
+import { EntitlementsModule } from '../billing/entitlements.module';
 
 /**
  * Feed do Discord: self-bot que captura mensagens de canais monitorados (CRUD de
@@ -21,7 +23,7 @@ import { DiscordMonitorService } from './discord-monitor.service';
  * (leitura) e JWT+Admin (gestão). O self-bot é inerte sem `DISCORD_USER_TOKEN`.
  */
 @Module({
-  imports: [PrismaModule, HttpModule],
+  imports: [PrismaModule, HttpModule, EntitlementsModule],
   controllers: [
     FeedController,
     MonitorsController,
@@ -36,6 +38,9 @@ import { DiscordMonitorService } from './discord-monitor.service';
     FavoritesService,
     TelegramService,
     DiscordMonitorService,
+    FeedAccessService,
   ],
+  // O gateway de tempo real e os alertas aplicam o MESMO recorte por plano.
+  exports: [FeedAccessService],
 })
 export class FeedModule {}

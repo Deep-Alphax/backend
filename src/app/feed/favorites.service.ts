@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { CapturedMessage, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { processAvatar } from '../users/avatar.util';
+import { FeedAccessService } from './feed-access.service';
 import {
   CreateFavoriteDto,
   FavoritesFeedQueryDto,
@@ -65,6 +66,7 @@ export class FavoritesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly access: FeedAccessService,
   ) {}
 
   private apiBaseUrl(): string {
@@ -259,7 +261,11 @@ export class FavoritesService {
       return { items: [], page, limit, total: 0, totalPages: 0 };
     }
 
-    const where = { authorTag: { in: keys } };
+    // Seguir um autor não fura o plano: o FREE vê dele só o que caiu nos
+    // grupos liberados.
+    const where: Prisma.CapturedMessageWhereInput = {
+      AND: [{ authorTag: { in: keys } }, await this.access.whereFor(userId)],
+    };
     const [items, total] = await Promise.all([
       read.capturedMessage.findMany({
         where,

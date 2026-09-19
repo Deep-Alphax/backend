@@ -1,12 +1,21 @@
 import { Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Plan } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PlanGuard } from '../billing/guards/plan.guard';
+import { RequiresPlan } from '../billing/decorators/requires-plan.decorator';
 import { WalletReaderService } from './wallet-reader.service';
 
-/** Wallet Reader — varredura de sidewallets/copytraders (JWT). */
+/**
+ * Wallet Reader — varredura de sidewallets/copytraders (JWT).
+ *
+ * Controller inteiro é PRO: todo scan é sobre as carteiras de um KOL, e as
+ * carteiras são justamente o que o FREE não vê (ver `KolIndexService`).
+ */
 @ApiTags('Wallet Reader')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PlanGuard)
+@RequiresPlan(Plan.PRO)
 @Controller('api/v1/wallet-reader')
 export class WalletReaderController {
   constructor(private readonly service: WalletReaderService) {}

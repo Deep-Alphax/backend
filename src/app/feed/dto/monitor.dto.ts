@@ -46,6 +46,11 @@ export class CreateMonitorDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  // Grupo liberado para o plano FREE (default false = só PRO).
+  @IsOptional()
+  @IsBoolean()
+  freeTier?: boolean;
 }
 
 /** Atualiza uma regra (todos os campos opcionais). */
@@ -83,6 +88,11 @@ export class UpdateMonitorDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  // Grupo liberado para o plano FREE (default false = só PRO).
+  @IsOptional()
+  @IsBoolean()
+  freeTier?: boolean;
 }
 
 /** Query de listagem do feed de capturas (paginada + filtros). */
